@@ -34,11 +34,24 @@ Frame decode_state(const unitree_hg::msg::dds_::LowState_& s) {
   f.validity = Frame::VALID_JOINTS | Frame::VALID_IMU;
   f.joints.name = joint_names();
   for (size_t i = 0; i < 29; ++i) {
+    const auto& motor = s.motor_state()[i];
+    if (!std::isfinite(motor.q()) || !std::isfinite(motor.dq()) || !std::isfinite(motor.tau_est()))
+      throw std::runtime_error("Nonfinite native joint feedback");
     f.joints.position.push_back(s.motor_state()[i].q());
     f.joints.velocity.push_back(s.motor_state()[i].dq());
     f.joints.effort.push_back(s.motor_state()[i].tau_est());
   }
   const auto& imu = s.imu_state();
+  double norm = 0;
+  for (float value : imu.quaternion()) {
+    if (!std::isfinite(value)) throw std::runtime_error("Nonfinite native quaternion");
+    norm += value * value;
+  }
+  if (std::abs(norm - 1.) > .001) throw std::runtime_error("Non-unit native quaternion");
+  for (float value : imu.gyroscope())
+    if (!std::isfinite(value)) throw std::runtime_error("Nonfinite native gyro");
+  for (float value : imu.accelerometer())
+    if (!std::isfinite(value)) throw std::runtime_error("Nonfinite native acceleration");
   f.imu.orientation.w = imu.quaternion()[0];
   f.imu.orientation.x = imu.quaternion()[1];
   f.imu.orientation.y = imu.quaternion()[2];
@@ -62,7 +75,8 @@ unitree_hg::msg::dds_::LowCmd_ encode_position(const Positions& q, uint8_t mode_
   cmd.mode_machine() = mode_machine;
   for (size_t i = 0; i < 29; ++i) {
     if (!std::isfinite(q[i]) || q[i] < lower_limits()[i] || q[i] > upper_limits()[i])
-      throw std::runtime_error("Encoder position bounds");
+      throw std::runtime_error("Encoder position bounds at " + joint_names()[i] +
+                               " q=" + std::to_string(q[i]));
     auto& m = cmd.motor_cmd()[i];
     m.mode() = 1;
     m.q() = q[i];
@@ -73,5 +87,21 @@ unitree_hg::msg::dds_::LowCmd_ encode_position(const Positions& q, uint8_t mode_
   }
   cmd.crc() = command_crc(cmd);
   return cmd;
+}
+unitree_hg::msg::dds_::LowCmd_ encode_damping(uint8_t mode_machine) {
+  unitree_hg::msg::dds_::LowCmd_ command{};
+  command.mode_pr() = 0;
+  command.mode_machine() = mode_machine;
+  for (size_t i = 0; i < 29; ++i) {
+    auto& motor = command.motor_cmd()[i];
+    motor.mode() = 1;
+    motor.kp() = 0;
+    motor.kd() = 2;
+    motor.q() = 0;
+    motor.dq() = 0;
+    motor.tau() = 0;
+  }
+  command.crc() = command_crc(command);
+  return command;
 }
 }  // namespace anakin::env

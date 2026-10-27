@@ -4,6 +4,10 @@ script=$(realpath -- "${BASH_SOURCE[0]}")
 repo=$(cd -- "$(dirname -- "$script")/.." && pwd)
 ws=${ANAKIN_WS:-"$repo/../anakin_cpp_ws"}
 ws=$(cd -- "$ws" && pwd)
+if [[ ${1:-} == --loopback-sim ]]; then
+ shift
+ exec "$ws/install/anakin_env/lib/anakin_env/anakin_sim_runner" --workspace "$ws" "$@"
+fi
 demo=false
 duration=8.0
 if [[ ${1:-} == --demo-switch ]]; then demo=true; duration=12.0; shift; fi

@@ -8,11 +8,22 @@ if [[ -d "$repo/install/anakin_env" ]]; then default_prefix="$repo/install/anaki
 prefix=${ANAKIN_PREFIX:-"$default_prefix"}
 read -r sdk_revision < "$repo/anakin_sdk.revision"
 grep -Fq -- "$sdk_revision" "$sdk_prefix/share/anakin_sdk/cmake/revision.cmake" || { echo 'SDK revision mismatch' >&2; exit 2; }
-binary="$prefix/lib/anakin_env/anakin_env_node"
+node=anakin_env_node
+native=false
+if [[ ${1:-} == --loopback-sim ]]; then native=true; node=anakin_env_native_node; shift; fi
+binary="$prefix/lib/anakin_env/$node"
 [[ -x "$binary" ]] || { echo "Missing C++ binary: $binary" >&2; exit 2; }
+
+built_lock="$prefix/share/anakin_env/runtime-sdk.revision"
+[[ -f "$built_lock" ]] || { echo 'Binary SDK build provenance is missing; rebuild this prefix' >&2; exit 2; }
+read -r built_revision < "$built_lock"
+[[ "$built_revision" == "$sdk_revision" ]] || { echo 'Binary was built against another SDK revision; rebuild this prefix' >&2; exit 2; }
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-87}
 export ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export AMENT_PREFIX_PATH="$sdk_prefix:$prefix:/opt/ros/humble${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$sdk_prefix/lib:$prefix/lib:/opt/ros/humble/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [[ "$native" == true ]]; then
+ exec "$binary" --ros-args -p backend:=unitree_loopback_sim "$@"
+fi
 exec "$binary" --ros-args "$@"
