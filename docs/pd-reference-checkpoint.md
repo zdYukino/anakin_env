@@ -1,3 +1,5 @@
+> Later communication-free send P2 work and the still-open full-path budget P1 are recorded in [send-p2-checkpoint.md](send-p2-checkpoint.md). This file preserves the preceding v3 checkpoint.
+
 # PD_REFERENCE finite checkpoint, 2026-10-27 15:58 UTC
 
 SDK v3 and communication-free A/B1 encoders are implemented and tested. Both PD_REFERENCE profiles remain disabled for native execution because three required execution budgets have no reliable source. No A/B1 floating or native loco/CR7/loco acceptance is claimed. This is a checkpoint for independent review, not an enabled controller or a safety certification.

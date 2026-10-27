@@ -2,6 +2,7 @@
 #include <anakin_env/discovery.hpp>
 #include <anakin_env/execution.hpp>
 #include <anakin_env/reference.hpp>
+#include <anakin_env/send.hpp>
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/srv/switch_inference_mode.hpp>
 #include <atomic>
@@ -110,6 +111,7 @@ class NativeNode final : public rclcpp::Node {
   Switch::Request request_{};
   std::optional<Target> target_;
   uint64_t epoch_ = 0, state_seq_ = 0, generation_ = 0, accepted_ = 0, rejected_ = 0;
+  uint64_t send_generation_ = 0;
   uint64_t bad_baseline_ = 0, reset_baseline_ = 0, sdk_writes_ = 0, active_writes_ = 0,
            damping_writes_ = 0, local_writes_ = 0, loop_ticks_ = 0, skipped_periods_ = 0;
   bool terminal_failure_ = false, have_request_ = false, accepted_request_ = false,
@@ -142,6 +144,7 @@ class NativeNode final : public rclcpp::Node {
   rclcpp::Client<Switch>::SharedPtr client_;
 
   void stop_local(const std::string& why, bool failure) {
+    ++send_generation_;
     gate_.stop();
     status_router_.revoke();
     target_.reset();
@@ -162,6 +165,7 @@ class NativeNode final : public rclcpp::Node {
     const bool startup_profile = control_.mode() == ExecutionMode::Hold;
     preparing_damp_ = control_.mode() != ExecutionMode::Hold;
     control_.prepare();
+    ++send_generation_;
     ++epoch_;
     request_ = Switch::Request{};
     request_.session_id = session_;
@@ -352,108 +356,124 @@ class NativeNode final : public rclcpp::Node {
     frame_.diagnostics.header.stamp = system_stamp();
     frame_.diagnostics.status.push_back(diagnostic);
   }
-  bool write_command(LowCommand command, Clock::time_point now, const Target* target, bool damping,
-                     Clock::time_point absolute_end = Clock::time_point::max()) {
-    std::optional<Clock::time_point> reference_feedback_acquired;
-    const auto write_now = Clock::now();
-    if (write_now >= absolute_end ||
-        (damping && !control_.authorized() && !control_.damping(write_now)))
-      return false;
-    if (!damping) {
-      const auto state = transport_.sample();
+  bool write_command(LowCommand command, Clock::time_point now, const Target* input_target,
+                     bool damping, Clock::time_point absolute_end = Clock::time_point::max()) {
+    // Keep the attempted transaction alive if an encoding fault locally revokes target_.
+    const std::optional<Target> target_copy =
+        input_target ? std::optional<Target>(*input_target) : std::nullopt;
+    const auto* target = target_copy ? &*target_copy : nullptr;
+    const SendRequest request{damping, target != nullptr, send_generation_, absolute_end};
+    std::optional<NativeSample> sampled;
+    const auto observe = [&] {
+      sampled = transport_.sample();
       const auto remote = transport_.remote();
-      if (!state || write_now - state->acquired > 40ms || !remote.valid ||
-          write_now - remote.acquired > 250ms || (target && !gate_.live(write_now))) {
-        stop_local("Freshness expired immediately before SDK write", true);
-        if (state) write_command(encode_damping(state->mode_machine), write_now, nullptr, true);
-        return false;
+      SendSnapshot snapshot;
+      snapshot.position_authorized = control_.authorized() && !stopping_;
+      snapshot.damping_allowed = control_.damping(Clock::now());
+      snapshot.damping_deadline = control_.damping_deadline();
+      snapshot.stop_requested = remote.valid && (remote.keys & ((1u << 8) | (1u << 9)));
+      snapshot.state_available = sampled.has_value();
+      snapshot.feedback_integrity_ok =
+          transport_.bad_packets() == bad_baseline_ && transport_.resets() == reset_baseline_;
+      if (sampled) {
+        snapshot.state_acquired = sampled->acquired;
+        snapshot.feedback_generation = sampled->generation;
       }
-    }
-    if (target && command_semantics_ == pd_reference) {
-      const auto feedback = transport_.sample();
-      if (!feedback || Clock::now() - feedback->acquired > 40ms) {
-        stop_local("Reference state stale before encoding", true);
-        return false;
+      snapshot.remote_valid = remote.valid;
+      snapshot.remote_acquired = remote.acquired;
+      snapshot.target_authorized = gate_.live(Clock::now());
+      snapshot.target_deadline = gate_.deadline();
+      snapshot.authorization_generation = send_generation_;
+      return snapshot;
+    };
+    const auto encode = [&](const SendSnapshot&) {
+      PreparedSend<LowCommand> prepared{command, std::nullopt};
+      if (target && command_semantics_ == mechanical_position) {
+        Positions q{};
+        std::copy_n(target->target.points[0].positions.begin(), 29, q.begin());
+        prepared.command =
+            encode_position(q, sampled->mode_machine, target->gain_profile, target->model_id);
       }
-      reference_feedback_acquired = feedback->acquired;
-      Positions mux{}, q{}, dq{};
-      if (feedback->frame.joints.position.size() != 29 ||
-          feedback->frame.joints.velocity.size() != 29) {
-        stop_local("Reference feedback dimensions", true);
-        return false;
-      }
-      std::copy_n(target->target.points[0].positions.begin(), 29, mux.begin());
-      std::copy_n(feedback->frame.joints.position.begin(), 29, q.begin());
-      std::copy_n(feedback->frame.joints.velocity.begin(), 29, dq.begin());
-      try {
-        auto report = encode_reference(mux, q, dq, feedback->mode_machine, target->gain_profile,
-                                       target->model_id, target->execution_profile,
-                                       target->command_semantics, frozen_reference_budget());
-        saturation_watch_.check(report, Clock::now(), frozen_reference_budget());
-        command = report.command;
-        for (size_t i = 0; i < 29; ++i) {
-          projection_events_ += report.projected[i];
-          saturation_samples_ += report.saturated[i];
-          peak_compensation_ = std::max(peak_compensation_, std::abs(report.compensation[i]));
-          peak_total_effort_ = std::max(peak_total_effort_, std::abs(report.encoded_effort[i]));
+      if (target && command_semantics_ == pd_reference) {
+        const auto feedback = sampled;
+        if (!feedback || Clock::now() - feedback->acquired > 40ms) {
+          throw std::runtime_error("Reference state stale before encoding");
         }
-        if (reference_trace_) {
-          reference_trace_ << std::setprecision(17) << "{\"epoch\":" << target->epoch
-                           << ",\"seq\":" << target->seq
-                           << ",\"model\":" << std::quoted(target->model_id)
-                           << ",\"profile\":" << std::quoted(target->execution_profile);
-          const auto values = [this](const char* label, const auto& data) {
-            reference_trace_ << ",\"" << label << "\":[";
-            for (size_t i = 0; i < 29; ++i) {
-              if (i) reference_trace_ << ',';
-              reference_trace_ << data[i];
-            }
-            reference_trace_ << ']';
-          };
-          values("mux_reference", report.mux_reference);
-          values("sdk_position", report.sdk_position);
-          values("compensation", report.compensation);
-          values("virtual_effort", report.virtual_effort);
-          values("encoded_effort", report.encoded_effort);
-          values("projected", report.projected);
-          values("saturated", report.saturated);
-          values("measured_q", q);
-          values("measured_dq", dq);
-          reference_trace_ << "}\n";
+        prepared.feedback = EncodedFeedback{feedback->generation, feedback->acquired};
+        Positions mux{}, q{}, dq{};
+        if (feedback->frame.joints.position.size() != 29 ||
+            feedback->frame.joints.velocity.size() != 29) {
+          throw std::runtime_error("Reference feedback dimensions");
         }
-      } catch (const std::exception& error) {
-        stop_local(std::string("Reference budget/encoding: ") + error.what(), true);
-        return false;
+        std::copy_n(target->target.points[0].positions.begin(), 29, mux.begin());
+        std::copy_n(feedback->frame.joints.position.begin(), 29, q.begin());
+        std::copy_n(feedback->frame.joints.velocity.begin(), 29, dq.begin());
+        try {
+          auto report = encode_reference(mux, q, dq, feedback->mode_machine, target->gain_profile,
+                                         target->model_id, target->execution_profile,
+                                         target->command_semantics, frozen_reference_budget());
+          saturation_watch_.check(report, Clock::now(), frozen_reference_budget());
+          prepared.command = report.command;
+          for (size_t i = 0; i < 29; ++i) {
+            projection_events_ += report.projected[i];
+            saturation_samples_ += report.saturated[i];
+            peak_compensation_ = std::max(peak_compensation_, std::abs(report.compensation[i]));
+            peak_total_effort_ = std::max(peak_total_effort_, std::abs(report.encoded_effort[i]));
+          }
+          if (reference_trace_) {
+            reference_trace_ << std::setprecision(17) << "{\"epoch\":" << target->epoch
+                             << ",\"seq\":" << target->seq
+                             << ",\"model\":" << std::quoted(target->model_id)
+                             << ",\"profile\":" << std::quoted(target->execution_profile);
+            const auto values = [this](const char* label, const auto& data) {
+              reference_trace_ << ",\"" << label << "\":[";
+              for (size_t i = 0; i < 29; ++i) {
+                if (i) reference_trace_ << ',';
+                reference_trace_ << data[i];
+              }
+              reference_trace_ << ']';
+            };
+            values("mux_reference", report.mux_reference);
+            values("sdk_position", report.sdk_position);
+            values("compensation", report.compensation);
+            values("virtual_effort", report.virtual_effort);
+            values("encoded_effort", report.encoded_effort);
+            values("projected", report.projected);
+            values("saturated", report.saturated);
+            values("measured_q", q);
+            values("measured_dq", dq);
+            reference_trace_ << "}\n";
+          }
+        } catch (const std::exception& error) {
+          throw std::runtime_error(std::string("Reference budget/encoding: ") + error.what());
+        }
       }
-    }
-    const auto immediately_before_write = Clock::now();
-    if (immediately_before_write >= absolute_end ||
-        (damping && !control_.authorized() && !control_.damping(immediately_before_write)))
-      return false;
-    if (!damping) {
-      const auto state = transport_.sample();
-      const auto remote = transport_.remote();
-      if (!state || immediately_before_write - state->acquired > 40ms || !remote.valid ||
-          immediately_before_write - remote.acquired > 250ms ||
-          (target && !gate_.live(immediately_before_write)) ||
-          (reference_feedback_acquired &&
-           immediately_before_write - *reference_feedback_acquired > 40ms)) {
-        stop_local("Freshness expired after encoding immediately before SDK write", true);
-        return false;
+      return prepared;
+    };
+    const auto result = guarded_send<LowCommand>(
+        request, [] { return Clock::now(); }, observe, encode,
+        [this](const LowCommand& packet) { return transport_.write(packet); });
+    if (!result.written()) {
+      switch (result.status) {
+        case SendStatus::DeadlineExpired:
+        case SendStatus::DampingExpired:
+        case SendStatus::Revoked:
+        case SendStatus::FeedbackChanged:
+          return false;
+        case SendStatus::RemoteStop:
+          stop_local("RC stop immediately before SDK write", false);
+          return false;
+        default:
+          break;
       }
-    }
-    bool written = false;
-    try {
-      written = transport_.write(command);
-    } catch (const std::exception& error) {
-      stop_local(std::string("SDK writer exception: ") + error.what(), true);
+      stop_local("SDK send gate status=" + std::to_string(static_cast<int>(result.status)) + " " +
+                     result.detail,
+                 true);
+      if (result.phase == SendPhase::BeforeEncoding && sampled)
+        write_command(encode_damping(sampled->mode_machine), Clock::now(), nullptr, true);
       return false;
     }
-    if (!written) {
-      stop_local("SDK writer rejected publication", true);
-      return false;
-    }
-    now = Clock::now();
+    now = result.completed_at;
     ++sdk_writes_;
     if (first_write_ == Clock::time_point{}) first_write_ = now;
     final_write_ = now;
@@ -525,6 +545,7 @@ class NativeNode final : public rclcpp::Node {
           reset_baseline_ = transport_.resets();
           commands_ = MotionCommand{};
           control_.stand(measured, now);
+          ++send_generation_;
           RCLCPP_INFO(get_logger(),
                       "RC authorized measured-pose alignment; inference remains disabled");
         }
@@ -568,12 +589,7 @@ class NativeNode final : public rclcpp::Node {
     if (control_.authorized() && fresh && rc_fresh) {
       if (have_request_ && target_ && gate_.live(now)) {
         // Recheck the monotonic target deadline immediately before the SDK write.
-        Positions q{};
-        std::copy_n(target_->target.points[0].positions.begin(), 29, q.begin());
-        const auto command = command_semantics_ == pd_reference
-                                 ? LowCommand{}
-                                 : encode_position(q, sample->mode_machine, target_->gain_profile,
-                                                   target_->model_id);
+        const LowCommand command{};
         if (!gate_.live(Clock::now()))
           stop_local("Target expired before SDK write", true);
         else {
@@ -616,6 +632,7 @@ class NativeNode final : public rclcpp::Node {
         target_->phase == Target::TARGET_ACTIVE && target_->model_id == request_.target_model &&
         gate_.live(Clock::now()) && confirmation_.active();
     // Stop is independent of ROS reception or any MC acknowledgement.
+    ++send_generation_;
     gate_.stop();
     target_.reset();
     if (control_.authorized() && native_) {
@@ -696,17 +713,15 @@ class NativeNode final : public rclcpp::Node {
   }
   void run() {
     bool natural_completion = false;
-    auto next = Clock::now();
+    PeriodicSendSchedule schedule(Clock::now());
     while (!stopping_ && rclcpp::ok()) {
-      std::this_thread::sleep_until(next);
+      std::this_thread::sleep_until(schedule.next());
       const auto now = Clock::now();
-      max_lateness_ms_ =
-          std::max(max_lateness_ms_, std::chrono::duration<double, std::milli>(now - next).count());
-      next += 2ms;
-      while (next <= now) {
-        next += 2ms;
-        ++skipped_periods_;
-      }
+      const auto slot = schedule.consume(now);
+      if (!slot.due) continue;
+      max_lateness_ms_ = std::max(max_lateness_ms_,
+                                  std::chrono::duration<double, std::milli>(slot.lateness).count());
+      skipped_periods_ += slot.skipped;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         try {

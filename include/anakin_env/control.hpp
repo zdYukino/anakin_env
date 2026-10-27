@@ -136,6 +136,7 @@ class LocalControl {
     damping_until_ = was_authorized ? now + std::chrono::milliseconds(100) : now;
   }
   bool damping(Clock::time_point now) const { return now < damping_until_; }
+  Clock::time_point damping_deadline() const { return damping_until_; }
   void settle(Clock::time_point now) {
     if (mode_ == ExecutionMode::Damping && !damping(now)) mode_ = ExecutionMode::Disarmed;
   }

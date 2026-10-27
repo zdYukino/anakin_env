@@ -26,6 +26,7 @@ class Gate {
   void state(const Frame& f, Clock::time_point acquired);
   bool accept(const Target& t, Clock::time_point now, std::string& reason);
   bool live(Clock::time_point now) const;
+  Clock::time_point deadline() const { return expires_; }
   void stop();
   uint64_t accepted_seq() const { return accepted_seq_; }
   uint8_t phase_mask() const { return phase_mask_; }
