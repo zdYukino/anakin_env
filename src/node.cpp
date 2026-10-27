@@ -106,6 +106,8 @@ class Node final : public rclcpp::Node {
     request_.schema_id = schema_id;
     request_.target_model = model;
     request_.gain_profile = "g1_asap_sim_v1";
+    request_.execution_profile = strict_execution_profile;
+    request_.command_semantics = mechanical_position;
     request_.transition_profile = "g1_named_upper_v1";
     request_.allow_source_continuation = true;
     request_.timeout.sec = 5;
@@ -138,6 +140,12 @@ class Node final : public rclcpp::Node {
     if (!have_request_ || s.session_id != session_ || s.request_id != request_.request_id ||
         s.epoch != epoch_)
       return;
+    if (s.gain_profile != request_.gain_profile ||
+        s.execution_profile != request_.execution_profile ||
+        s.command_semantics != request_.command_semantics) {
+      fail("Offline status execution contract mismatch");
+      return;
+    }
     confirmation_.status(s);
     if (s.state == Status::FAILED) {
       fail("MC transaction failed: " + s.detail);
@@ -154,19 +162,21 @@ class Node final : public rclcpp::Node {
   void send_request() {
     if (!client_->service_is_ready()) return;
     const auto id = request_.request_id;
-    auto future = client_->async_send_request(std::make_shared<Switch::Request>(request_),
-                                              [this, id](rclcpp::Client<Switch>::SharedFuture f) {
-                                                if (id != request_.request_id || terminal_failure_)
-                                                  return;
-                                                in_flight_ = false;
-                                                auto response = f.get();
-                                                if (response->accepted &&
-                                                    response->mc_instance_id == mc_instance_ &&
-                                                    response->epoch == epoch_)
-                                                  accepted_request_ = true;
-                                                else
-                                                  fail("Switch rejected: " + response->detail);
-                                              });
+    auto future = client_->async_send_request(
+        std::make_shared<Switch::Request>(request_),
+        [this, id](rclcpp::Client<Switch>::SharedFuture f) {
+          if (id != request_.request_id || terminal_failure_) return;
+          in_flight_ = false;
+          auto response = f.get();
+          if (response->accepted && response->mc_instance_id == mc_instance_ &&
+              response->epoch == epoch_ &&
+              response->execution_profile == request_.execution_profile &&
+              response->command_semantics == request_.command_semantics &&
+              response->gain_profile == request_.gain_profile)
+            accepted_request_ = true;
+          else
+            fail("Switch rejected: " + response->detail);
+        });
     pending_id_ = future.request_id;
     in_flight_ = true;
     sent_ = Clock::now();
@@ -196,6 +206,8 @@ class Node final : public rclcpp::Node {
     f.state_seq = ++state_seq_;
     f.validity = 7;
     f.gain_profile = "g1_asap_sim_v1";
+    f.execution_profile = strict_execution_profile;
+    f.command_semantics = mechanical_position;
     f.execution_authorized = false;
     f.joints.header = f.header;
     f.joints.name = joint_names();

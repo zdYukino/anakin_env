@@ -25,7 +25,12 @@ class Fixture final : public rclcpp::Node {
         [this](Switch::Request::SharedPtr q, Switch::Response::SharedPtr a) {
           a->mc_instance_id = instance_;
           a->epoch = q->next_epoch;
-          a->accepted = q->expected_mc_instance_id == instance_;
+          a->accepted = q->expected_mc_instance_id == instance_ &&
+                        anakin::known_execution_contract(q->execution_profile, q->command_semantics,
+                                                         q->gain_profile);
+          a->execution_profile = q->execution_profile;
+          a->command_semantics = q->command_semantics;
+          a->gain_profile = q->gain_profile;
           if (a->accepted && (!have_ || q->request_id != request_.request_id)) {
             request_ = *q;
             have_ = true;
@@ -78,6 +83,8 @@ class Fixture final : public rclcpp::Node {
     s.requested_model = request_.target_model;
     s.active_model = request_.target_model;
     s.gain_profile = request_.gain_profile;
+    s.execution_profile = request_.execution_profile;
+    s.command_semantics = request_.command_semantics;
     s.phase_first_seq[2] = first_;
     s.phase_last_seq[2] = ++seq_;
     s.published_phase_mask = 4;
@@ -100,6 +107,8 @@ class Fixture final : public rclcpp::Node {
     t.source_state_seq = latest_->state_seq;
     t.model_id = request_.target_model;
     t.gain_profile = request_.gain_profile;
+    t.execution_profile = request_.execution_profile;
+    t.command_semantics = request_.command_semantics;
     t.validity = 1;
     t.valid_for.nanosec = 40000000;
     t.phase = 4;

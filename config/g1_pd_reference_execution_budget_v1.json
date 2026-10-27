@@ -1,0 +1,1435 @@
+{
+  "profile_revision": "g1_pd_reference_execution_budget_v1",
+  "model_repo_commit": "1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d",
+  "mujoco_version": "3.3.6",
+  "timestep_s": 0.002,
+  "complete_for_native_execution": false,
+  "known_budgets": {
+    "asap_loco": {
+      "effective_effort_cap_nm": [
+        88,
+        88,
+        88,
+        139,
+        50,
+        50,
+        88,
+        88,
+        88,
+        139,
+        50,
+        50,
+        88,
+        50,
+        50,
+        25,
+        25,
+        18.0,
+        18.0,
+        10.0,
+        5,
+        5,
+        25,
+        25,
+        18.0,
+        18.0,
+        10.0,
+        5,
+        5
+      ],
+      "original_merged_effort_cap_nm": [
+        88.0,
+        88.0,
+        88.0,
+        139.0,
+        50.0,
+        50.0,
+        88.0,
+        88.0,
+        88.0,
+        139.0,
+        50.0,
+        50.0,
+        200.0,
+        200.0,
+        200.0,
+        40.0,
+        40.0,
+        18.0,
+        18.0,
+        10.0,
+        10.0,
+        10.0,
+        40.0,
+        40.0,
+        18.0,
+        18.0,
+        10.0,
+        10.0,
+        10.0
+      ]
+    },
+    "asap_cr7": {
+      "effective_effort_cap_nm": [
+        88,
+        88,
+        88,
+        139,
+        50,
+        50,
+        88,
+        88,
+        88,
+        139,
+        50,
+        50,
+        88,
+        50,
+        50,
+        25,
+        25,
+        25,
+        25,
+        10.0,
+        5,
+        5,
+        25,
+        25,
+        25,
+        25,
+        10.0,
+        5,
+        5
+      ],
+      "original_merged_effort_cap_nm": [
+        88.0,
+        88.0,
+        88.0,
+        139.0,
+        50.0,
+        50.0,
+        88.0,
+        88.0,
+        88.0,
+        139.0,
+        50.0,
+        50.0,
+        88.0,
+        50.0,
+        50.0,
+        25.0,
+        25.0,
+        25.0,
+        25.0,
+        10.0,
+        10.0,
+        10.0,
+        25.0,
+        25.0,
+        25.0,
+        25.0,
+        10.0,
+        10.0,
+        10.0
+      ]
+    }
+  },
+  "missing_execution_budgets": [
+    "per_joint_velocity_limit",
+    "near_limit_guard_or_validated_stopping_envelope",
+    "maximum_saturation_duration"
+  ],
+  "missing_budget_policy": "Reject both PD_REFERENCE profiles before native SDK initialization. No runtime overrides or test fixture budgets are accepted.",
+  "compensation_cap_rule": "min(compiled control*unit gear, compiled joint actuator force, original merged policy torque_limit)",
+  "virtual_envelope_rule": "intersection(existing position bounds, compiled position bounds) +/- compensation_cap / encoded_Kp",
+  "expected_effort_rule": "Reject before sending if either virtual PD effort or encoded PD effort exceeds the effective effort cap. Projection cannot hide a virtual effort excess.",
+  "saturation_duration_budget_s": null,
+  "velocity_limits_rad_s": null,
+  "near_limit_margin_rad": null,
+  "actuators": [
+    {
+      "index": 0,
+      "joint": "left_hip_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.5307,
+        2.8798
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 1,
+      "joint": "left_hip_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.5236,
+        2.9671
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 2,
+      "joint": "left_hip_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.7576,
+        2.7576
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 3,
+      "joint": "left_knee_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.087267,
+        2.8798
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -139,
+        139
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -139,
+        139
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 4,
+      "joint": "left_ankle_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.87267,
+        0.5236
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 5,
+      "joint": "left_ankle_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.2618,
+        0.2618
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 6,
+      "joint": "right_hip_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.5307,
+        2.8798
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 7,
+      "joint": "right_hip_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.9671,
+        0.5236
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 8,
+      "joint": "right_hip_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.7576,
+        2.7576
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 9,
+      "joint": "right_knee_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.087267,
+        2.8798
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -139,
+        139
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -139,
+        139
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 10,
+      "joint": "right_ankle_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.87267,
+        0.5236
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 11,
+      "joint": "right_ankle_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.2618,
+        0.2618
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 12,
+      "joint": "waist_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.618,
+        2.618
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -88,
+        88
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -88,
+        88
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 13,
+      "joint": "waist_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.52,
+        0.52
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 14,
+      "joint": "waist_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -0.52,
+        0.52
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -50,
+        50
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -50,
+        50
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 15,
+      "joint": "left_shoulder_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -3.0892,
+        2.6704
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 16,
+      "joint": "left_shoulder_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.5882,
+        2.2515
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 17,
+      "joint": "left_shoulder_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.618,
+        2.618
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 18,
+      "joint": "left_elbow_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.0472,
+        2.0944
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 19,
+      "joint": "left_wrist_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.97222,
+        1.97222
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 20,
+      "joint": "left_wrist_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.61443,
+        1.61443
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -5,
+        5
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -5,
+        5
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 21,
+      "joint": "left_wrist_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.61443,
+        1.61443
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -5,
+        5
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -5,
+        5
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 22,
+      "joint": "right_shoulder_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -3.0892,
+        2.6704
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 23,
+      "joint": "right_shoulder_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.2515,
+        1.5882
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 24,
+      "joint": "right_shoulder_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -2.618,
+        2.618
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 25,
+      "joint": "right_elbow_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.0472,
+        2.0944
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 26,
+      "joint": "right_wrist_roll_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.97222,
+        1.97222
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -25,
+        25
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -25,
+        25
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 27,
+      "joint": "right_wrist_pitch_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.61443,
+        1.61443
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -5,
+        5
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -5,
+        5
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    },
+    {
+      "index": 28,
+      "joint": "right_wrist_yaw_joint",
+      "transmission_type": 0,
+      "gear": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "joint_type": 3,
+      "position_limited": 1,
+      "position_range": [
+        -1.61443,
+        1.61443
+      ],
+      "joint_margin": 0,
+      "joint_solref": [
+        0.02,
+        1
+      ],
+      "control_limited": 1,
+      "control_range": [
+        -5,
+        5
+      ],
+      "actuator_force_limited": 0,
+      "actuator_force_range": [
+        0,
+        0
+      ],
+      "joint_actuator_force_limited": 1,
+      "joint_actuator_force_range": [
+        -5,
+        5
+      ],
+      "gain_type": 0,
+      "bias_type": 0,
+      "dynamics_type": 0,
+      "gain0": 1,
+      "velocity_limit_available": false
+    }
+  ],
+  "source_sha256": {
+    "unitree_mujoco/unitree_robots/g1/scene_29dof.xml": "e254f11acce2ec6f6efa5bf9b15e288bbd0ca29aeeabb1e1d0fea92f65436bbf",
+    "unitree_mujoco/unitree_robots/g1/g1_29dof.xml": "423e28bd718b19f7a65cda539b6f794ddbb268b4b9bdbd85f4bd982b30729617",
+    "unitree_mujoco/simulate/src/unitree_sdk2_bridge.h": "8bd7a48e0e66738359b6c75ca4f2f4760b0670012a86a86a7b8396a3a5bfeaad",
+    "Anakin/robojudo/tools/tool_cfgs.py": "5c5df694d2e42b52d98cd0438c7d27000805bf48b76c686ab93b19830472a8ed",
+    "Anakin/robojudo/config/g1/env/g1_env_cfg.py": "a8546af716ab1592a3bed8feed6afed4c5e18d61c6f9ec65b008768390b346a9",
+    "Anakin/robojudo/config/g1/policy/g1_asap_policy_cfg.py": "4515e0fafe7d13eda0b427e9626f436cbf4ff7ef3ede22bbd1db4b21284f4493"
+  }
+}

@@ -17,10 +17,15 @@ int main() {
     gate.begin(session, mc, request, 4, "asap_loco", true);
     auto base = Clock::now();
     Frame f;
+    f.schema_version = schema_version;
+    f.schema_id = schema_id;
     f.session_id = session;
     f.epoch = 4;
     f.state_seq = 11;
     f.validity = 3;
+    f.gain_profile = legacy_gain_profile;
+    f.execution_profile = strict_execution_profile;
+    f.command_semantics = mechanical_position;
     f.joints.name = joint_names();
     f.joints.position.assign(29, 0);
     f.joints.velocity.assign(29, 0);
@@ -36,6 +41,8 @@ int main() {
     t.source_state_seq = 11;
     t.model_id = "asap_loco";
     t.gain_profile = "g1_asap_sim_v1";
+    t.execution_profile = strict_execution_profile;
+    t.command_semantics = mechanical_position;
     t.validity = 1;
     t.valid_for.nanosec = 40000000;
     t.phase = Target::TARGET_ACTIVE;

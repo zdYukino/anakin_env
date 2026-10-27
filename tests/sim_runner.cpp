@@ -154,6 +154,7 @@ int main(int argc, char** argv) {
     int sdk_domain = 31, ros_domain = 188;
     double duration = 20., alignment_seconds = 2.;
     std::string gain_profile = "g1_asap_merged_sim_v1";
+    std::string execution_profile = "g1_position_strict_sim_v1";
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--workspace" && i + 1 < argc)
@@ -174,12 +175,14 @@ int main(int argc, char** argv) {
         duration = std::stod(argv[++i]);
       else if (argument == "--alignment-seconds" && i + 1 < argc)
         alignment_seconds = std::stod(argv[++i]);
+      else if (argument == "--execution-profile" && i + 1 < argc)
+        execution_profile = argv[++i];
       else if (argument == "--gain-profile" && i + 1 < argc)
         gain_profile = argv[++i];
       else
         throw std::runtime_error(
             "Usage: --workspace PATH [--suspended] [--demo-switch|--rc-loss] [--duration 20] "
-            "[--sdk-domain 31] [--ros-domain 188]");
+            "[--sdk-domain 31] [--ros-domain 188] [--execution-profile PROFILE]");
     }
     if (ws.empty() || !std::isfinite(duration) || !std::isfinite(alignment_seconds) ||
         duration < 10 || duration > 60 || alignment_seconds < .25 || alignment_seconds > 5. ||
@@ -275,6 +278,8 @@ int main(int argc, char** argv) {
                                       "-p",
                                       "gain_profile:=" + gain_profile,
                                       "-p",
+                                      "execution_profile:=" + execution_profile,
+                                      "-p",
                                       "min_active_seconds:=5.0",
                                       "-p",
                                       std::string("expected_modes:=") + (demo ? "3" : "1"),
@@ -303,6 +308,7 @@ int main(int argc, char** argv) {
              << ",\n  \"duration\": " << duration << ",\n  \"demo_switch\": " << demo
              << ",\n  \"alignment_seconds\": " << alignment_seconds
              << ",\n  \"gain_profile\": " << std::quoted(gain_profile)
+             << ",\n  \"execution_profile\": " << std::quoted(execution_profile)
              << ",\n  \"remote_loss_fault\": " << rc_loss << "\n}\n";
     write(run / "manifest.json", manifest.str());
     const auto deadline = Clock::now() + std::chrono::duration<double>(duration + 15);

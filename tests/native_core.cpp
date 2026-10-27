@@ -1,4 +1,5 @@
 #include <anakin_env/control.hpp>
+#include <anakin_env/discovery.hpp>
 #include <anakin_env/execution.hpp>
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/simulation_profile.hpp>
@@ -10,6 +11,103 @@ using namespace std::chrono_literals;
 using namespace anakin::env;
 void check(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
+}
+void native_discovery_regression(Clock::time_point now) {
+  using namespace anakin;
+  using Router = NativeStatusRouter;
+  auto fresh_session = new_uuid(), old_session = new_uuid(), instance = new_uuid();
+  Router router(fresh_session);
+  LocalControl control;
+  Router::Status old;
+  old.schema_version = schema_version;
+  old.schema_id = schema_id;
+  old.session_id = old_session;
+  old.request_id = new_uuid();
+  old.mc_instance_id = instance;
+  old.epoch = 1;
+  old.accepted = true;
+  old.requested_model = "asap_loco";
+  old.gain_profile = merged_gain_profile;
+  old.execution_profile = strict_execution_profile;
+  old.command_semantics = mechanical_position;
+  check(router.observe(old) == Router::Decision::Ignore && zero(router.instance()) &&
+            !control.authorized(),
+        "Old transaction cannot discover native peer or authorize execution");
+  auto discovery = old;
+  discovery.session_id = Uuid{};
+  discovery.request_id = Uuid{};
+  discovery.epoch = 0;
+  discovery.accepted = false;
+  check(router.observe(discovery) == Router::Decision::Discovered &&
+            router.instance() == instance && !control.authorized(),
+        "Independent native discovery identifies peer but stays disarmed");
+  Router::Request request;
+  request.session_id = fresh_session;
+  request.expected_mc_instance_id = instance;
+  request.request_id = new_uuid();
+  request.next_epoch = 1;
+  request.source_state_seq = 1;
+  request.schema_id = schema_id;
+  request.target_model = "asap_loco";
+  request.gain_profile = merged_gain_profile;
+  request.execution_profile = strict_execution_profile;
+  request.command_semantics = mechanical_position;
+  bool refused = false;
+  try {
+    router.bind(request, control.authorized());
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  check(refused, "Discovery cannot substitute for fresh local RC authorization");
+  RemoteSample rc;
+  rc.valid = true;
+  rc.keys = 3u | (1u << 10);
+  RemoteEdges edges;
+  check(!edges.update(rc).x && !control.authorized(),
+        "Held old RC edge cannot authorize fresh env");
+  rc.keys = 0;
+  edges.update(rc);
+  rc.keys = 3u | (1u << 10);
+  check(edges.update(rc).x && control.stand(Positions{}, now),
+        "Fresh RC edge deliberately authorizes alignment");
+  control.local_target(now + 2s);
+  check(!edges.update(rc).x && control.mode() == ExecutionMode::Hold,
+        "Held first RC press cannot request inference after alignment");
+  rc.keys = 0;
+  edges.update(rc);
+  rc.keys = 3u | (1u << 10);
+  check(edges.update(rc).x, "A second fresh RC edge requests inference from hold");
+  control.prepare();
+  auto reused = request;
+  reused.session_id = old_session;
+  refused = false;
+  try {
+    router.bind(reused, control.authorized());
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  check(refused, "Even fresh RC cannot reuse previous env session");
+  router.bind(request, control.authorized());
+  check(router.observe(old) == Router::Decision::Ignore,
+        "Old transaction status cannot authorize fresh session");
+  auto current = old;
+  current.session_id = fresh_session;
+  current.request_id = request.request_id;
+  check(router.observe(current) == Router::Decision::Transaction,
+        "Only explicitly bound fresh native transaction routes");
+  current.gain_profile = legacy_gain_profile;
+  check(router.observe(current) == Router::Decision::ContractMismatch,
+        "Native contract mismatch is separate from discovery");
+  router.revoke();
+  current.gain_profile = merged_gain_profile;
+  check(router.observe(current) == Router::Decision::Ignore,
+        "Late status after local revoke cannot revive authorization");
+  Router restarted(new_uuid());
+  LocalControl restarted_control;
+  check(restarted.observe(old) == Router::Decision::Ignore &&
+            restarted.observe(discovery) == Router::Decision::Discovered &&
+            !restarted_control.authorized(),
+        "Restarted native env needs independent discovery and new RC/session authorization");
 }
 void execution_regressions(Clock::time_point now) {
   DeadlineSchedule schedule(now, 100ms);
@@ -103,6 +201,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     const auto now = Clock::now();
+    native_discovery_regression(now);
     execution_regressions(now);
     for (const auto* profile : {anakin::legacy_gain_profile, anakin::merged_gain_profile}) {
       bool invalid_model = false;

@@ -1,3 +1,5 @@
+> Later SDK v3/reference work and the disabled PD profiles are recorded in [pd-reference-checkpoint.md](pd-reference-checkpoint.md). This file preserves its earlier checkpoint.
+
 > Later review repairs and the still-open PD-reference P1 are recorded in [review-fixes-20261027.md](review-fixes-20261027.md). This file preserves the earlier checkpoint.
 
 # Current checkpoint

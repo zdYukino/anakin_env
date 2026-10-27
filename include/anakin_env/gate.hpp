@@ -20,7 +20,9 @@ class Gate {
  public:
   void begin(const Uuid& session, const Uuid& instance, const Uuid& request, uint64_t epoch,
              const std::string& model, bool continuation,
-             const std::string& profile = legacy_gain_profile);
+             const std::string& profile = legacy_gain_profile,
+             const std::string& execution = strict_execution_profile,
+             uint8_t semantics = mechanical_position);
   void state(const Frame& f, Clock::time_point acquired);
   bool accept(const Target& t, Clock::time_point now, std::string& reason);
   bool live(Clock::time_point now) const;
@@ -31,7 +33,9 @@ class Gate {
  private:
   Uuid session_{}, instance_{}, request_{};
   uint64_t epoch_ = 0, accepted_seq_ = 0;
-  std::string model_, gain_profile_ = legacy_gain_profile;
+  std::string model_, gain_profile_ = legacy_gain_profile,
+                      execution_profile_ = strict_execution_profile;
+  uint8_t semantics_ = mechanical_position;
   bool continuation_ = false;
   std::deque<Sample> samples_;
   std::optional<Positions> previous_;

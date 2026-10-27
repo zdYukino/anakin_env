@@ -1,5 +1,7 @@
 #include <anakin_env/confirmation.hpp>
+#include <anakin_env/discovery.hpp>
 #include <anakin_env/execution.hpp>
+#include <anakin_env/reference.hpp>
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/srv/switch_inference_mode.hpp>
 #include <atomic>
@@ -33,6 +35,19 @@ class NativeNode final : public rclcpp::Node {
     gain_profile_ = declare_parameter<std::string>("gain_profile", merged_gain_profile);
     if (!known_gain_profile(gain_profile_))
       throw std::runtime_error("Unknown simulation gain profile");
+    execution_profile_ =
+        declare_parameter<std::string>("execution_profile", strict_execution_profile);
+    const int semantics =
+        declare_parameter<int>("command_semantics", profile_semantics(execution_profile_));
+    if (semantics < 0 || semantics > 255 ||
+        !known_execution_contract(execution_profile_, static_cast<uint8_t>(semantics),
+                                  gain_profile_))
+      throw std::runtime_error("Unknown/mismatched execution profile, semantics or gains");
+    command_semantics_ = static_cast<uint8_t>(semantics);
+    // Must occur before NativeTransport::start_loopback; there are no runtime
+    // parameter overrides for missing frozen budgets or unit-test fixture budgets.
+    require_native_reference_budget(execution_profile_, command_semantics_,
+                                    frozen_reference_budget());
     const double alignment_seconds = declare_parameter<double>("alignment_seconds", 2.);
     control_.set_alignment_seconds(alignment_seconds);
     duration_ = declare_parameter<double>("duration", 20.);
@@ -66,6 +81,11 @@ class NativeNode final : public rclcpp::Node {
         get_logger(),
         "NATIVE_SIM disarmed; interface=lo SDK-domain=%d; RC source=%s; no hardware backend",
         domain, remote.c_str());
+    if (command_semantics_ == pd_reference && !result_path_.empty()) {
+      reference_trace_.open(result_path_ + ".references.jsonl");
+      if (!reference_trace_)
+        throw std::runtime_error("Cannot open reference execution diagnostics");
+    }
     started_ = Clock::now();
     worker_ = std::thread([this] { run(); });
   }
@@ -86,6 +106,7 @@ class NativeNode final : public rclcpp::Node {
   TransactionHealth health_;
   ActiveRunAcceptance run_acceptance_;
   Uuid session_ = new_uuid(), env_instance_ = new_uuid(), mc_instance_{};
+  NativeStatusRouter status_router_{session_};
   Switch::Request request_{};
   std::optional<Target> target_;
   uint64_t epoch_ = 0, state_seq_ = 0, generation_ = 0, accepted_ = 0, rejected_ = 0;
@@ -101,7 +122,12 @@ class NativeNode final : public rclcpp::Node {
   std::vector<double> sdk_gaps_ms_;
   std::atomic<bool> stopping_{false};
   std::thread worker_;
-  std::string failure_, last_reject_, result_path_, gain_profile_;
+  std::string failure_, last_reject_, result_path_, gain_profile_, execution_profile_;
+  uint8_t command_semantics_ = mechanical_position;
+  SaturationWatch saturation_watch_;
+  uint64_t projection_events_ = 0, saturation_samples_ = 0;
+  double peak_compensation_ = 0, peak_total_effort_ = 0;
+  std::ofstream reference_trace_;
   std::ofstream telemetry_;
   Frame frame_;
   std::optional<NativeSample> native_;
@@ -117,6 +143,7 @@ class NativeNode final : public rclcpp::Node {
 
   void stop_local(const std::string& why, bool failure) {
     gate_.stop();
+    status_router_.revoke();
     target_.reset();
     run_acceptance_.break_tail();
     health_.fail();
@@ -146,10 +173,14 @@ class NativeNode final : public rclcpp::Node {
     request_.target_model = model;
     run_acceptance_.begin(model, epoch_);
     request_.gain_profile = gain_profile_;
+    request_.execution_profile = execution_profile_;
+    request_.command_semantics = command_semantics_;
     request_.transition_profile = startup_profile ? "g1_startup_v1" : "g1_named_upper_v1";
     request_.allow_source_continuation = true;
     request_.timeout.sec = 5;
-    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true, gain_profile_);
+    status_router_.bind(request_, control_.authorized());
+    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true, gain_profile_,
+                execution_profile_, command_semantics_);
     confirmation_.begin(session_, mc_instance_, request_.request_id, epoch_);
     health_.begin(Clock::now() + 5s);
     target_.reset();
@@ -196,23 +227,18 @@ class NativeNode final : public rclcpp::Node {
   }
   void on_status(const Status& status) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (status.schema_version != schema_version || status.schema_id != schema_id ||
-        zero(status.mc_instance_id))
-      return;
-    if (zero(mc_instance_)) {
-      if (zero(status.session_id) && zero(status.request_id)) mc_instance_ = status.mc_instance_id;
+    const auto route = status_router_.observe(status);
+    if (route == NativeStatusRouter::Decision::Discovered) {
+      mc_instance_ = status_router_.instance();
       return;
     }
-    if (status.mc_instance_id != mc_instance_) {
+    if (route == NativeStatusRouter::Decision::Ignore) return;
+    if (route == NativeStatusRouter::Decision::InstanceChanged) {
       stop_local("MC instance changed; restart with explicit authorization", true);
       return;
     }
-    if (!have_request_ || status.session_id != session_ ||
-        status.request_id != request_.request_id || status.epoch != epoch_)
-      return;
-    if (status.requested_model != request_.target_model ||
-        status.gain_profile != request_.gain_profile) {
-      stop_local("MC status model/gain mismatch", true);
+    if (route == NativeStatusRouter::Decision::ContractMismatch) {
+      stop_local("MC status execution contract mismatch", true);
       return;
     }
     confirmation_.status(status);
@@ -242,7 +268,9 @@ class NativeNode final : public rclcpp::Node {
           try {
             const auto response = future.get();
             if (response->accepted && response->mc_instance_id == mc_instance_ &&
-                response->epoch == epoch_)
+                response->epoch == epoch_ && response->execution_profile == execution_profile_ &&
+                response->command_semantics == command_semantics_ &&
+                response->gain_profile == gain_profile_)
               accepted_request_ = true;
             else
               stop_local("Inference request rejected: " + response->detail, true);
@@ -269,6 +297,8 @@ class NativeNode final : public rclcpp::Node {
     frame_.epoch = epoch_;
     frame_.state_seq = state_seq_;
     frame_.gain_profile = gain_profile_;
+    frame_.execution_profile = execution_profile_;
+    frame_.command_semantics = command_semantics_;
     frame_.execution_mode = static_cast<uint8_t>(control_.mode());
     frame_.execution_authorized = control_.mode() == ExecutionMode::Active && gate_.live(now) &&
                                   now - sample.acquired <= 40ms && rc.valid &&
@@ -322,8 +352,9 @@ class NativeNode final : public rclcpp::Node {
     frame_.diagnostics.header.stamp = system_stamp();
     frame_.diagnostics.status.push_back(diagnostic);
   }
-  bool write_command(const LowCommand& command, Clock::time_point now, const Target* target,
-                     bool damping, Clock::time_point absolute_end = Clock::time_point::max()) {
+  bool write_command(LowCommand command, Clock::time_point now, const Target* target, bool damping,
+                     Clock::time_point absolute_end = Clock::time_point::max()) {
+    std::optional<Clock::time_point> reference_feedback_acquired;
     const auto write_now = Clock::now();
     if (write_now >= absolute_end ||
         (damping && !control_.authorized() && !control_.damping(write_now)))
@@ -338,10 +369,79 @@ class NativeNode final : public rclcpp::Node {
         return false;
       }
     }
+    if (target && command_semantics_ == pd_reference) {
+      const auto feedback = transport_.sample();
+      if (!feedback || Clock::now() - feedback->acquired > 40ms) {
+        stop_local("Reference state stale before encoding", true);
+        return false;
+      }
+      reference_feedback_acquired = feedback->acquired;
+      Positions mux{}, q{}, dq{};
+      if (feedback->frame.joints.position.size() != 29 ||
+          feedback->frame.joints.velocity.size() != 29) {
+        stop_local("Reference feedback dimensions", true);
+        return false;
+      }
+      std::copy_n(target->target.points[0].positions.begin(), 29, mux.begin());
+      std::copy_n(feedback->frame.joints.position.begin(), 29, q.begin());
+      std::copy_n(feedback->frame.joints.velocity.begin(), 29, dq.begin());
+      try {
+        auto report = encode_reference(mux, q, dq, feedback->mode_machine, target->gain_profile,
+                                       target->model_id, target->execution_profile,
+                                       target->command_semantics, frozen_reference_budget());
+        saturation_watch_.check(report, Clock::now(), frozen_reference_budget());
+        command = report.command;
+        for (size_t i = 0; i < 29; ++i) {
+          projection_events_ += report.projected[i];
+          saturation_samples_ += report.saturated[i];
+          peak_compensation_ = std::max(peak_compensation_, std::abs(report.compensation[i]));
+          peak_total_effort_ = std::max(peak_total_effort_, std::abs(report.encoded_effort[i]));
+        }
+        if (reference_trace_) {
+          reference_trace_ << std::setprecision(17) << "{\"epoch\":" << target->epoch
+                           << ",\"seq\":" << target->seq
+                           << ",\"model\":" << std::quoted(target->model_id)
+                           << ",\"profile\":" << std::quoted(target->execution_profile);
+          const auto values = [this](const char* label, const auto& data) {
+            reference_trace_ << ",\"" << label << "\":[";
+            for (size_t i = 0; i < 29; ++i) {
+              if (i) reference_trace_ << ',';
+              reference_trace_ << data[i];
+            }
+            reference_trace_ << ']';
+          };
+          values("mux_reference", report.mux_reference);
+          values("sdk_position", report.sdk_position);
+          values("compensation", report.compensation);
+          values("virtual_effort", report.virtual_effort);
+          values("encoded_effort", report.encoded_effort);
+          values("projected", report.projected);
+          values("saturated", report.saturated);
+          values("measured_q", q);
+          values("measured_dq", dq);
+          reference_trace_ << "}\n";
+        }
+      } catch (const std::exception& error) {
+        stop_local(std::string("Reference budget/encoding: ") + error.what(), true);
+        return false;
+      }
+    }
     const auto immediately_before_write = Clock::now();
     if (immediately_before_write >= absolute_end ||
         (damping && !control_.authorized() && !control_.damping(immediately_before_write)))
       return false;
+    if (!damping) {
+      const auto state = transport_.sample();
+      const auto remote = transport_.remote();
+      if (!state || immediately_before_write - state->acquired > 40ms || !remote.valid ||
+          immediately_before_write - remote.acquired > 250ms ||
+          (target && !gate_.live(immediately_before_write)) ||
+          (reference_feedback_acquired &&
+           immediately_before_write - *reference_feedback_acquired > 40ms)) {
+        stop_local("Freshness expired after encoding immediately before SDK write", true);
+        return false;
+      }
+    }
     bool written = false;
     try {
       written = transport_.write(command);
@@ -375,6 +475,7 @@ class NativeNode final : public rclcpp::Node {
       maybe_complete();
     } else {
       run_acceptance_.break_tail();
+      saturation_watch_.reset();
       if (damping)
         ++damping_writes_;
       else
@@ -469,8 +570,10 @@ class NativeNode final : public rclcpp::Node {
         // Recheck the monotonic target deadline immediately before the SDK write.
         Positions q{};
         std::copy_n(target_->target.points[0].positions.begin(), 29, q.begin());
-        const auto command =
-            encode_position(q, sample->mode_machine, target_->gain_profile, target_->model_id);
+        const auto command = command_semantics_ == pd_reference
+                                 ? LowCommand{}
+                                 : encode_position(q, sample->mode_machine, target_->gain_profile,
+                                                   target_->model_id);
         if (!gate_.live(Clock::now()))
           stop_local("Target expired before SDK write", true);
         else {
@@ -528,6 +631,7 @@ class NativeNode final : public rclcpp::Node {
     }
     passed = passed && !terminal_failure_;
     if (telemetry_) telemetry_.flush();
+    if (reference_trace_) reference_trace_.flush();
     std::sort(sdk_gaps_ms_.begin(), sdk_gaps_ms_.end());
     const auto percentile = [this](double p) {
       if (sdk_gaps_ms_.empty()) return 0.;
@@ -560,6 +664,13 @@ class NativeNode final : public rclcpp::Node {
             << ",\n  \"failure\": " << std::quoted(failure_)
             << ",\n  \"last_rejection\": " << std::quoted(last_reject_) << "\n}\n";
     if (!result_path_.empty()) {
+      std::ofstream execution(result_path_ + ".execution.json");
+      execution << "{\"profile\":" << std::quoted(execution_profile_)
+                << ",\"command_semantics\":" << static_cast<int>(command_semantics_)
+                << ",\"projection_events\":" << projection_events_
+                << ",\"saturation_samples\":" << saturation_samples_
+                << ",\"peak_compensation_nm\":" << peak_compensation_
+                << ",\"peak_expected_effort_nm\":" << peak_total_effort_ << "}\n";
       std::ofstream sequence(result_path_ + ".model-sequence.json");
       sequence << '[';
       bool first = true;

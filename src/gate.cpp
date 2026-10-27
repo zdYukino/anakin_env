@@ -1,4 +1,6 @@
+#include <anakin_env/actuation_limits.hpp>
 #include <anakin_env/gate.hpp>
+#include <anakin_sdk/simulation_profile.hpp>
 #include <cmath>
 namespace anakin::env {
 const Positions& lower_limits() {
@@ -18,11 +20,16 @@ const Positions& upper_limits() {
   return a;
 }
 void Gate::begin(const Uuid& s, const Uuid& i, const Uuid& r, uint64_t e, const std::string& model,
-                 bool continuation, const std::string& profile) {
+                 bool continuation, const std::string& profile, const std::string& execution,
+                 uint8_t semantics) {
   if (s == session_ && (e <= epoch_ || r == request_))
     throw std::invalid_argument("Gate reauthorization requires a new transaction and epoch");
   if (!known_gain_profile(profile)) throw std::invalid_argument("Unknown execution gain profile");
+  if (!known_execution_contract(execution, semantics, profile))
+    throw std::invalid_argument("Unknown execution contract");
   gain_profile_ = profile;
+  execution_profile_ = execution;
+  semantics_ = semantics;
   revoked_ = false;
   session_ = s;
   instance_ = i;
@@ -36,8 +43,10 @@ void Gate::begin(const Uuid& s, const Uuid& i, const Uuid& r, uint64_t e, const 
   expires_ = {};
 }
 void Gate::state(const Frame& f, Clock::time_point t) {
-  if (f.session_id != session_ || f.epoch != epoch_ || f.joints.position.size() != 29 ||
-      f.joints.name != joint_names() || (f.validity & 3) != 3)
+  if (f.schema_version != schema_version || f.schema_id != schema_id || f.session_id != session_ ||
+      f.epoch != epoch_ || f.gain_profile != gain_profile_ ||
+      f.execution_profile != execution_profile_ || f.command_semantics != semantics_ ||
+      f.joints.position.size() != 29 || f.joints.name != joint_names() || (f.validity & 3) != 3)
     return;
   if (!samples_.empty() && f.state_seq <= samples_.back().seq) return;
   Positions q;
@@ -59,6 +68,8 @@ bool Gate::accept(const Target& t, Clock::time_point now, std::string& why) {
     return reject("session/instance/request");
   if (t.epoch != epoch_) return reject("epoch");
   if (t.seq <= accepted_seq_) return reject("sequence");
+  if (t.execution_profile != execution_profile_ || t.command_semantics != semantics_)
+    return reject("execution profile/semantics");
   if (t.gain_profile != gain_profile_ || t.validity != 1) return reject("gain/validity");
   if (t.phase != Target::SOURCE_CONTINUATION && t.phase != Target::TRANSITION_ENTRY &&
       t.phase != Target::TARGET_ACTIVE)
@@ -84,8 +95,17 @@ bool Gate::accept(const Target& t, Clock::time_point now, std::string& why) {
   Positions q;
   for (size_t i = 0; i < 29; ++i) {
     q[i] = p.positions[i];
-    if (!std::isfinite(q[i]) || q[i] < lower_limits()[i] || q[i] > upper_limits()[i])
-      return reject("position limit/nonfinite");
+    if (!std::isfinite(q[i])) return reject("position limit/nonfinite");
+    if (semantics_ == mechanical_position) {
+      if (q[i] < lower_limits()[i] || q[i] > upper_limits()[i])
+        return reject("position limit/nonfinite");
+    } else {
+      const auto lower = reference_lower_limits(), upper = reference_upper_limits();
+      const double cap = simulation_effort_caps(t.model_id)[i];
+      const double kp = static_cast<float>(simulation_gains(gain_profile_, t.model_id).kp[i]);
+      if (q[i] < lower[i] - cap / kp || q[i] > upper[i] + cap / kp)
+        return reject("virtual reference envelope");
+    }
     const double previous = previous_ ? (*previous_)[i] : source->q[i];
     if (std::abs(q[i] - previous) > .35) return reject("target discontinuity");
   }

@@ -1,3 +1,5 @@
+> Later SDK v3/reference work and the disabled PD profiles are recorded in [pd-reference-checkpoint.md](pd-reference-checkpoint.md). This file preserves its earlier checkpoint.
+
 # Native review repair checkpoint, 2026-10-27 15:19 UTC
 
 This is a reviewable partial checkpoint. Four review findings have implementation and focused regression evidence. The virtual-PD-reference/physical-position contract conflict remains an open P1. Floating locomotion, native loco/CR7/loco completion and deployment are not accepted. No independent final review has passed. Actual native switch-time gain handover remains unrun because the open P1 blocks initial TARGET_ACTIVE; packet matrices and source-model selection have separate focused coverage.

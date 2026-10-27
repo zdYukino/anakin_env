@@ -1,15 +1,18 @@
 
 #include <dlfcn.h>
 
+#include <anakin_env/actuation_limits.hpp>
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/msg/control_target.hpp>
 #include <anakin_sdk/msg/inference_status.hpp>
+#include <anakin_sdk/simulation_profile.hpp>
 #include <atomic>
 #include <csignal>
 #include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <rclcpp/rclcpp.hpp>
 #include <set>
@@ -67,11 +70,33 @@ class Probe final : public rclcpp::Node {
             if (fault_seen_ != Clock::time_point{} && Clock::now() - fault_seen_ > 20ms)
               ++late_position_after_fault_;
             for (auto it = targets_.rbegin(); it != targets_.rend(); ++it) {
-              bool matches = true;
-              for (size_t i = 0; i < 29; ++i)
-                matches = matches &&
-                          std::abs(command.motor_cmd()[i].q() -
-                                   static_cast<float>(it->target.points[0].positions[i])) < 1e-6f;
+              bool matches = known_execution_contract(it->execution_profile, it->command_semantics,
+                                                      it->gain_profile);
+              if (!matches) continue;
+              const auto mode = execution_encoding(it->execution_profile, it->command_semantics);
+              const auto& gains = simulation_gains(it->gain_profile, it->model_id);
+              const auto lower = reference_lower_limits(), upper = reference_upper_limits();
+              for (size_t i = 0; i < 29; ++i) {
+                const double mux = it->target.points[0].positions[i];
+                float expected_q = static_cast<float>(mux), expected_tau = 0;
+                if (mode != ExecutionEncoding::StrictPosition) {
+                  expected_q = static_cast<float>(std::clamp(mux, lower[i], upper[i]));
+                  if (expected_q < lower[i])
+                    expected_q = std::nextafter(expected_q, std::numeric_limits<float>::infinity());
+                  if (expected_q > upper[i])
+                    expected_q =
+                        std::nextafter(expected_q, -std::numeric_limits<float>::infinity());
+                  if (mode == ExecutionEncoding::EquivalentReference)
+                    expected_tau = static_cast<float>(
+                        static_cast<double>(static_cast<float>(gains.kp[i])) *
+                        (static_cast<double>(static_cast<float>(mux)) - expected_q));
+                }
+                const auto& motor = command.motor_cmd()[i];
+                matches = matches && std::abs(motor.q() - expected_q) < 1e-6f &&
+                          std::abs(motor.tau() - expected_tau) < 1e-6f &&
+                          motor.kp() == static_cast<float>(gains.kp[i]) &&
+                          motor.kd() == static_cast<float>(gains.kd[i]);
+              }
               if (matches) {
                 ++matched_targets_;
                 break;
