@@ -1,3 +1,5 @@
+> Later review repairs and the still-open PD-reference P1 are recorded in [review-fixes-20261027.md](review-fixes-20261027.md). This file preserves the earlier checkpoint.
+
 # Native C++ review checkpoint — 2026-10-27 UTC
 
 This is a local review checkpoint. Sustained native floating policy execution has not passed. No physical backend, physical-robot authorization or remote Git operation is included.

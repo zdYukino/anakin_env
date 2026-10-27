@@ -1,16 +1,125 @@
 #include <anakin_env/control.hpp>
+#include <anakin_env/execution.hpp>
 #include <anakin_env/transport.hpp>
+#include <anakin_sdk/simulation_profile.hpp>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 using namespace std::chrono_literals;
 using namespace anakin::env;
 void check(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
 }
-int main() {
+void execution_regressions(Clock::time_point now) {
+  DeadlineSchedule schedule(now, 100ms);
+  check(schedule.due(now), "First stop slot");
+  check(!schedule.due(now), "No same-time catch-up burst");
+  check(schedule.due(now + 2ms), "Second stop slot");
+  check(schedule.due(now + 86ms), "Delayed stop slot skips missed periods");
+  check(schedule.next() == now + 88ms && !schedule.due(now + 86ms),
+        "Skipped stop slots stay skipped");
+  check(schedule.due(now + 99ms), "Last pre-deadline stop slot");
+  for (const auto delay : {100ms, 105ms, 1000ms})
+    check(schedule.done(now + delay) && !schedule.due(now + delay),
+          "No stop write at or after real deadline");
+  ActiveRunAcceptance active;
+  active.begin("asap_loco", 1);
+  for (int i = 0; i < 100; ++i) active.sdk_write(now + i * 2ms, false, "asap_loco", 1);
+  check(
+      active.tail_seconds() == 0 && active.total_seconds() == 0 && !active.confirm("asap_loco", 1),
+      "Transition entry cannot count active time or completion");
+  active.sdk_write(now + 200ms, true, "asap_loco", 1);
+  active.sdk_write(now + 202ms, true, "asap_loco", 1);
+  check(
+      active.tail_seconds() > .0019 && active.confirm("asap_loco", 1) && active.sequence_matches(1),
+      "Actual TARGET_ACTIVE writes count and confirm");
+  active.sdk_write(now + 243ms, true, "asap_loco", 1);
+  check(active.tail_seconds() == 0, "A write gap beyond TTL breaks continuous active time");
+  active.sdk_write(now + 245ms, true, "asap_loco", 1);
+  active.sdk_write(now + 247ms, false, "asap_loco", 1);
+  check(active.tail_seconds() == 0, "Transition phase breaks active tail");
+  for (uint64_t epoch = 2; epoch <= 3; ++epoch) {
+    active.begin("asap_loco", epoch);
+    check(active.tail_seconds() == 0, "New epoch starts a new active tail");
+    active.sdk_write(now, true, "asap_loco", epoch);
+    check(active.confirm("asap_loco", epoch), "Fresh same-model epoch can confirm");
+  }
+  check(active.models().size() == 1 && !active.sequence_matches(3),
+        "Repeated loco requests cannot impersonate a three-model sequence");
+  active.begin("asap_cr7", 4);
+  active.sdk_write(now, true, "asap_loco", 3);
+  check(!active.confirm("asap_cr7", 4), "Previous epoch write cannot confirm next model");
+  active.sdk_write(now, true, "asap_cr7", 4);
+  check(active.confirm("asap_cr7", 4) && active.sequence_matches(2), "Ordered second model");
+  active.begin("asap_loco", 5);
+  check(!active.sequence_matches(3), "Pending third model cannot count");
+  active.sdk_write(now, true, "asap_loco", 5);
+  check(active.confirm("asap_loco", 5) && active.sequence_matches(3) &&
+            !active.confirm("asap_cr7", 4),
+        "Ordered loco/CR7/loco with fresh epochs");
+  bool threw = false;
   try {
+    active.begin("asap_loco", 5);
+  } catch (const std::exception&) {
+    threw = true;
+  }
+  check(threw, "Acceptance epoch cannot be reused");
+}
+void dump_gains() {
+  using namespace anakin;
+  std::cout << std::setprecision(10) << '{';
+  bool first = true;
+  for (const auto* profile : {legacy_gain_profile, merged_gain_profile}) {
+    if (!first) std::cout << ',';
+    first = false;
+    std::cout << std::quoted(profile) << ":{";
+    bool first_model = true;
+    for (const auto* model : {"asap_loco", "asap_cr7"}) {
+      if (!first_model) std::cout << ',';
+      first_model = false;
+      const auto packet = encode_position(Positions{}, 5, profile, model);
+      check(packet.crc() == command_crc(packet), "Profile packet CRC");
+      std::cout << std::quoted(model) << ":{\"kp\":[";
+      for (size_t i = 0; i < 29; ++i) {
+        if (i) std::cout << ',';
+        std::cout << packet.motor_cmd()[i].kp();
+      }
+      std::cout << "],\"kd\":[";
+      for (size_t i = 0; i < 29; ++i) {
+        if (i) std::cout << ',';
+        std::cout << packet.motor_cmd()[i].kd();
+      }
+      std::cout << "]}";
+    }
+    std::cout << '}';
+  }
+  std::cout << "}\n";
+}
+int main(int argc, char** argv) {
+  try {
+    if (argc == 2 && std::string(argv[1]) == "--dump-gains") {
+      dump_gains();
+      return 0;
+    }
     const auto now = Clock::now();
+    execution_regressions(now);
+    for (const auto* profile : {anakin::legacy_gain_profile, anakin::merged_gain_profile}) {
+      bool invalid_model = false;
+      try {
+        encode_position(Positions{}, 5, profile, "unapproved_model");
+      } catch (const std::exception&) {
+        invalid_model = true;
+      }
+      check(invalid_model, "Unknown producing model cannot select gains");
+    }
+    bool invalid_profile = false;
+    try {
+      encode_position(Positions{}, 5, "unapproved_profile", "asap_loco");
+    } catch (const std::exception&) {
+      invalid_profile = true;
+    }
+    check(invalid_profile, "Unknown gain profile cannot encode a command");
     RemoteEdges edges;
     RemoteSample remote;
     remote.valid = true;
@@ -147,7 +256,8 @@ int main() {
     }
     check(threw, "CRC-valid nonfinite feedback rejected");
     std::cout << "PASS native RC mapping/edges, disarmed construction, FSM, finite stop/damping, "
-                 "loopback gate, finite feedback and CRC\n";
+                 "loopback gate, finite feedback, CRC, absolute stop deadline and active/model "
+                 "acceptance\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

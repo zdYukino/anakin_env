@@ -1,3 +1,5 @@
+> Later review repairs and the still-open PD-reference P1 are recorded in [review-fixes-20261027.md](review-fixes-20261027.md). This file preserves the earlier checkpoint.
+
 # Current checkpoint
 
 See [Native C++ review checkpoint](native-checkpoint.md) for the current schema v2 implementation, exact validation evidence, preserved failures and unrun acceptance items. Native floating deployment has not passed.

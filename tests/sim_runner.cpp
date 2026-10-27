@@ -153,6 +153,7 @@ int main(int argc, char** argv) {
     bool suspended = false, demo = false, rc_loss = false, trace_inference = false;
     int sdk_domain = 31, ros_domain = 188;
     double duration = 20., alignment_seconds = 2.;
+    std::string gain_profile = "g1_asap_merged_sim_v1";
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--workspace" && i + 1 < argc)
@@ -173,6 +174,8 @@ int main(int argc, char** argv) {
         duration = std::stod(argv[++i]);
       else if (argument == "--alignment-seconds" && i + 1 < argc)
         alignment_seconds = std::stod(argv[++i]);
+      else if (argument == "--gain-profile" && i + 1 < argc)
+        gain_profile = argv[++i];
       else
         throw std::runtime_error(
             "Usage: --workspace PATH [--suspended] [--demo-switch|--rc-loss] [--duration 20] "
@@ -258,16 +261,28 @@ int main(int argc, char** argv) {
     const auto mc = children.spawn("mc", mc_arguments, run / "mc.log", mc_env);
     auto env_env = env;
     env_env["ANAKIN_PREFIX"] = prefix.string();
-    const auto node = children.spawn(
-        "env",
-        {(base / "anakin_env/en_run.sh").string(), "--loopback-sim", "-p",
-         "sdk_domain:=" + std::to_string(sdk_domain), "-p", "remote_source:=wireless_topic", "-p",
-         "duration:=" + std::to_string(duration), "-p",
-         "alignment_seconds:=" + std::to_string(alignment_seconds), "-p", "min_active_seconds:=5.0",
-         "-p", std::string("expected_modes:=") + (demo ? "3" : "1"), "-p",
-         "result_json:=" + (run / "native-result.json").string(), "-p",
-         "telemetry_csv:=" + (run / "native.csv").string()},
-        run / "env.log", env_env);
+    const auto node = children.spawn("env",
+                                     {(base / "anakin_env/en_run.sh").string(),
+                                      "--loopback-sim",
+                                      "-p",
+                                      "sdk_domain:=" + std::to_string(sdk_domain),
+                                      "-p",
+                                      "remote_source:=wireless_topic",
+                                      "-p",
+                                      "duration:=" + std::to_string(duration),
+                                      "-p",
+                                      "alignment_seconds:=" + std::to_string(alignment_seconds),
+                                      "-p",
+                                      "gain_profile:=" + gain_profile,
+                                      "-p",
+                                      "min_active_seconds:=5.0",
+                                      "-p",
+                                      std::string("expected_modes:=") + (demo ? "3" : "1"),
+                                      "-p",
+                                      "result_json:=" + (run / "native-result.json").string(),
+                                      "-p",
+                                      "telemetry_csv:=" + (run / "native.csv").string()},
+                                     run / "env.log", env_env);
     const auto probe =
         children.spawn("probe",
                        {(prefix / "lib/anakin_env/anakin_sim_probe").string(), "--ros-args", "-p",
@@ -287,6 +302,7 @@ int main(int argc, char** argv) {
              << sdk_domain << ",\n  \"ros_domain\": " << ros_domain
              << ",\n  \"duration\": " << duration << ",\n  \"demo_switch\": " << demo
              << ",\n  \"alignment_seconds\": " << alignment_seconds
+             << ",\n  \"gain_profile\": " << std::quoted(gain_profile)
              << ",\n  \"remote_loss_fault\": " << rc_loss << "\n}\n";
     write(run / "manifest.json", manifest.str());
     const auto deadline = Clock::now() + std::chrono::duration<double>(duration + 15);

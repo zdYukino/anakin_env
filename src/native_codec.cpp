@@ -1,4 +1,5 @@
 #include <anakin_env/native_codec.hpp>
+#include <anakin_sdk/simulation_profile.hpp>
 #include <cmath>
 #include <cstring>
 namespace anakin::env {
@@ -64,12 +65,10 @@ Frame decode_state(const unitree_hg::msg::dds_::LowState_& s) {
   f.imu.linear_acceleration.z = imu.accelerometer()[2];
   return f;
 }
-unitree_hg::msg::dds_::LowCmd_ encode_position(const Positions& q, uint8_t mode_machine) {
-  // This codec does not open any network channel or confer execution authority.
-  const Positions kp = {100, 100, 100, 200, 20, 20, 100, 100, 100, 200, 20, 20, 400, 400, 400,
-                        90,  60,  20,  60,  4,  4,  4,   90,  60,  20,  60, 4,  4,   4};
-  const Positions kd = {2.5, 2.5, 2.5, 5, .2, .1, 2.5, 2.5, 2.5, 5,  .2, .1, 5,  5, 5,
-                        2,   1,   .4,  1, .2, .2, .2,  2,   1,   .4, 1,  .2, .2, .2};
+unitree_hg::msg::dds_::LowCmd_ encode_position(const Positions& q, uint8_t mode_machine,
+                                               const std::string& profile,
+                                               const std::string& model) {
+  const auto& gains = simulation_gains(profile, model);
   unitree_hg::msg::dds_::LowCmd_ cmd{};
   cmd.mode_pr() = 0;
   cmd.mode_machine() = mode_machine;
@@ -82,8 +81,8 @@ unitree_hg::msg::dds_::LowCmd_ encode_position(const Positions& q, uint8_t mode_
     m.q() = q[i];
     m.dq() = 0;
     m.tau() = 0;
-    m.kp() = kp[i];
-    m.kd() = kd[i];
+    m.kp() = gains.kp[i];
+    m.kd() = gains.kd[i];
   }
   cmd.crc() = command_crc(cmd);
   return cmd;

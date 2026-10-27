@@ -18,9 +18,11 @@ const Positions& upper_limits() {
   return a;
 }
 void Gate::begin(const Uuid& s, const Uuid& i, const Uuid& r, uint64_t e, const std::string& model,
-                 bool continuation) {
+                 bool continuation, const std::string& profile) {
   if (s == session_ && (e <= epoch_ || r == request_))
     throw std::invalid_argument("Gate reauthorization requires a new transaction and epoch");
+  if (!known_gain_profile(profile)) throw std::invalid_argument("Unknown execution gain profile");
+  gain_profile_ = profile;
   revoked_ = false;
   session_ = s;
   instance_ = i;
@@ -57,7 +59,7 @@ bool Gate::accept(const Target& t, Clock::time_point now, std::string& why) {
     return reject("session/instance/request");
   if (t.epoch != epoch_) return reject("epoch");
   if (t.seq <= accepted_seq_) return reject("sequence");
-  if (t.gain_profile != "g1_asap_sim_v1" || t.validity != 1) return reject("gain/validity");
+  if (t.gain_profile != gain_profile_ || t.validity != 1) return reject("gain/validity");
   if (t.phase != Target::SOURCE_CONTINUATION && t.phase != Target::TRANSITION_ENTRY &&
       t.phase != Target::TARGET_ACTIVE)
     return reject("phase");

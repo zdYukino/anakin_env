@@ -1,4 +1,5 @@
 #include <anakin_env/confirmation.hpp>
+#include <anakin_env/execution.hpp>
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/srv/switch_inference_mode.hpp>
 #include <atomic>
@@ -29,6 +30,9 @@ class NativeNode final : public rclcpp::Node {
     const auto remote = declare_parameter<std::string>("remote_source", "lowstate");
     if (remote != "lowstate" && remote != "wireless_topic")
       throw std::runtime_error("remote_source must be lowstate or wireless_topic");
+    gain_profile_ = declare_parameter<std::string>("gain_profile", merged_gain_profile);
+    if (!known_gain_profile(gain_profile_))
+      throw std::runtime_error("Unknown simulation gain profile");
     const double alignment_seconds = declare_parameter<double>("alignment_seconds", 2.);
     control_.set_alignment_seconds(alignment_seconds);
     duration_ = declare_parameter<double>("duration", 20.);
@@ -80,6 +84,7 @@ class NativeNode final : public rclcpp::Node {
   Gate gate_;
   ActiveConfirmation confirmation_;
   TransactionHealth health_;
+  ActiveRunAcceptance run_acceptance_;
   Uuid session_ = new_uuid(), env_instance_ = new_uuid(), mc_instance_{};
   Switch::Request request_{};
   std::optional<Target> target_;
@@ -92,12 +97,11 @@ class NativeNode final : public rclcpp::Node {
   int expected_modes_ = 1, completed_modes_ = 0;
   double duration_ = 20., min_active_ = 5., min_height_ = 100., max_tilt_ = 0.,
          active_seconds_ = 0., max_write_gap_ms_ = 0., max_lateness_ms_ = 0.;
-  Clock::time_point started_{}, sent_{}, last_write_{}, first_write_{}, final_write_{},
-      last_active_tick_{};
+  Clock::time_point started_{}, sent_{}, last_write_{}, first_write_{}, final_write_{};
   std::vector<double> sdk_gaps_ms_;
   std::atomic<bool> stopping_{false};
   std::thread worker_;
-  std::string failure_, last_reject_, result_path_;
+  std::string failure_, last_reject_, result_path_, gain_profile_;
   std::ofstream telemetry_;
   Frame frame_;
   std::optional<NativeSample> native_;
@@ -114,6 +118,7 @@ class NativeNode final : public rclcpp::Node {
   void stop_local(const std::string& why, bool failure) {
     gate_.stop();
     target_.reset();
+    run_acceptance_.break_tail();
     health_.fail();
     control_.stop(Clock::now(), failure);
     if (failure && !terminal_failure_) {
@@ -125,7 +130,7 @@ class NativeNode final : public rclcpp::Node {
       RCLCPP_INFO(get_logger(), "NATIVE local RC stop; new deliberate authorization required");
     }
   }
-  void start_request(const std::string& model) {
+  void start_request(std::string model) {
     if (terminal_failure_ || zero(mc_instance_)) return;
     const bool startup_profile = control_.mode() == ExecutionMode::Hold;
     preparing_damp_ = control_.mode() != ExecutionMode::Hold;
@@ -139,11 +144,12 @@ class NativeNode final : public rclcpp::Node {
     request_.source_state_seq = state_seq_ + 1;
     request_.schema_id = schema_id;
     request_.target_model = model;
-    request_.gain_profile = "g1_asap_sim_v1";
+    run_acceptance_.begin(model, epoch_);
+    request_.gain_profile = gain_profile_;
     request_.transition_profile = startup_profile ? "g1_startup_v1" : "g1_named_upper_v1";
     request_.allow_source_continuation = true;
     request_.timeout.sec = 5;
-    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true);
+    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true, gain_profile_);
     confirmation_.begin(session_, mc_instance_, request_.request_id, epoch_);
     health_.begin(Clock::now() + 5s);
     target_.reset();
@@ -163,7 +169,8 @@ class NativeNode final : public rclcpp::Node {
   void maybe_complete() {
     if (!terminal_failure_ && !completion_counted_ && confirmation_.active() &&
         published_active()) {
-      ++completed_modes_;
+      if (!run_acceptance_.confirm(request_.target_model, epoch_)) return;
+      completed_modes_ = static_cast<int>(run_acceptance_.models().size());
       completion_counted_ = true;
       RCLCPP_INFO(get_logger(),
                   "SDK_PUBLISHED epoch=%lu active-seq=%lu; writer receipt, not actuator execution",
@@ -261,7 +268,7 @@ class NativeNode final : public rclcpp::Node {
     frame_.env_instance_id = env_instance_;
     frame_.epoch = epoch_;
     frame_.state_seq = state_seq_;
-    frame_.gain_profile = "g1_asap_sim_v1";
+    frame_.gain_profile = gain_profile_;
     frame_.execution_mode = static_cast<uint8_t>(control_.mode());
     frame_.execution_authorized = control_.mode() == ExecutionMode::Active && gate_.live(now) &&
                                   now - sample.acquired <= 40ms && rc.valid &&
@@ -315,9 +322,12 @@ class NativeNode final : public rclcpp::Node {
     frame_.diagnostics.header.stamp = system_stamp();
     frame_.diagnostics.status.push_back(diagnostic);
   }
-  void write_command(const LowCommand& command, Clock::time_point now, const Target* target,
-                     bool damping) {
+  bool write_command(const LowCommand& command, Clock::time_point now, const Target* target,
+                     bool damping, Clock::time_point absolute_end = Clock::time_point::max()) {
     const auto write_now = Clock::now();
+    if (write_now >= absolute_end ||
+        (damping && !control_.authorized() && !control_.damping(write_now)))
+      return false;
     if (!damping) {
       const auto state = transport_.sample();
       const auto remote = transport_.remote();
@@ -325,19 +335,23 @@ class NativeNode final : public rclcpp::Node {
           write_now - remote.acquired > 250ms || (target && !gate_.live(write_now))) {
         stop_local("Freshness expired immediately before SDK write", true);
         if (state) write_command(encode_damping(state->mode_machine), write_now, nullptr, true);
-        return;
+        return false;
       }
     }
+    const auto immediately_before_write = Clock::now();
+    if (immediately_before_write >= absolute_end ||
+        (damping && !control_.authorized() && !control_.damping(immediately_before_write)))
+      return false;
     bool written = false;
     try {
       written = transport_.write(command);
     } catch (const std::exception& error) {
       stop_local(std::string("SDK writer exception: ") + error.what(), true);
-      return;
+      return false;
     }
     if (!written) {
       stop_local("SDK writer rejected publication", true);
-      return;
+      return false;
     }
     now = Clock::now();
     ++sdk_writes_;
@@ -351,16 +365,22 @@ class NativeNode final : public rclcpp::Node {
     last_write_ = now;
     if (target) {
       ++active_writes_;
+      run_acceptance_.sdk_write(now, target->phase == Target::TARGET_ACTIVE, target->model_id,
+                                target->epoch);
       if (published_.instance != target->mc_instance_id ||
           published_.request != target->request_id || published_.epoch != target->epoch)
         published_ = Receipt{target->mc_instance_id, target->request_id, target->epoch, 0, 0};
       published_.seq = target->seq;
       published_.mask |= target->phase;
       maybe_complete();
-    } else if (damping)
-      ++damping_writes_;
-    else
-      ++local_writes_;
+    } else {
+      run_acceptance_.break_tail();
+      if (damping)
+        ++damping_writes_;
+      else
+        ++local_writes_;
+    }
+    return true;
   }
   void tick(Clock::time_point now) {
     ++loop_ticks_;
@@ -449,31 +469,26 @@ class NativeNode final : public rclcpp::Node {
         // Recheck the monotonic target deadline immediately before the SDK write.
         Positions q{};
         std::copy_n(target_->target.points[0].positions.begin(), 29, q.begin());
-        const auto command = encode_position(q, sample->mode_machine);
+        const auto command =
+            encode_position(q, sample->mode_machine, target_->gain_profile, target_->model_id);
         if (!gate_.live(Clock::now()))
           stop_local("Target expired before SDK write", true);
         else {
           control_.active();
           write_command(command, now, &*target_, false);
-          if (last_active_tick_ != Clock::time_point{})
-            active_seconds_ += std::chrono::duration<double>(now - last_active_tick_).count();
-          last_active_tick_ = now;
         }
       } else if (control_.mode() == ExecutionMode::Aligning ||
                  control_.mode() == ExecutionMode::Hold ||
                  (control_.mode() == ExecutionMode::Preparing && !preparing_damp_)) {
-        write_command(encode_position(control_.local_target(now), sample->mode_machine), now,
-                      nullptr, false);
-        last_active_tick_ = {};
+        write_command(encode_position(control_.local_target(now), sample->mode_machine,
+                                      gain_profile_, "asap_loco"),
+                      now, nullptr, false);
       } else {
         write_command(encode_damping(sample->mode_machine), now, nullptr, true);
-        last_active_tick_ = {};
       }
     } else if (control_.damping(now)) {
       write_command(encode_damping(sample->mode_machine), now, nullptr, true);
-      last_active_tick_ = {};
     } else {
-      last_active_tick_ = {};
       last_write_ = {};
     }
     control_.settle(now);
@@ -490,19 +505,25 @@ class NativeNode final : public rclcpp::Node {
     }
   }
   void finish(bool natural_completion) {
-    bool passed = natural_completion && !terminal_failure_ &&
-                  control_.mode() == ExecutionMode::Active && completed_modes_ >= expected_modes_ &&
-                  active_seconds_ >= min_active_ && accepted_ >= 10 && min_height_ < 100. &&
-                  published_active();
+    active_seconds_ = run_acceptance_.tail_seconds();
+    bool passed =
+        natural_completion && !terminal_failure_ && control_.mode() == ExecutionMode::Active &&
+        run_acceptance_.sequence_matches(expected_modes_) && active_seconds_ >= min_active_ &&
+        accepted_ >= 10 && min_height_ < 100. && published_active() && target_ &&
+        target_->phase == Target::TARGET_ACTIVE && target_->model_id == request_.target_model &&
+        gate_.live(Clock::now()) && confirmation_.active();
     // Stop is independent of ROS reception or any MC acknowledgement.
     gate_.stop();
     target_.reset();
     if (control_.authorized() && native_) {
-      control_.stop(Clock::now(), false);
-      const auto end = Clock::now() + 100ms;
-      for (auto next = Clock::now(); next < end; next += 2ms) {
-        write_command(encode_damping(native_->mode_machine), Clock::now(), nullptr, true);
-        std::this_thread::sleep_until(next + 2ms);
+      const auto stop_start = Clock::now();
+      control_.stop(stop_start, false);
+      DeadlineSchedule schedule(stop_start, 100ms);
+      while (!schedule.done(Clock::now())) {
+        std::this_thread::sleep_until(schedule.next());
+        const auto now = Clock::now();
+        if (!schedule.due(now)) continue;
+        write_command(encode_damping(native_->mode_machine), now, nullptr, true, schedule.end());
       }
     }
     passed = passed && !terminal_failure_;
@@ -521,6 +542,7 @@ class NativeNode final : public rclcpp::Node {
             << "  \"accepted_targets\": " << accepted_ << ",\n  \"rejected_targets\": " << rejected_
             << ",\n  \"completed_modes\": " << completed_modes_
             << ",\n  \"active_seconds\": " << active_seconds_
+            << ",\n  \"target_active_total_seconds\": " << run_acceptance_.total_seconds()
             << ",\n  \"sdk_writes\": " << sdk_writes_
             << ",\n  \"policy_sdk_writes\": " << active_writes_
             << ",\n  \"local_sdk_writes\": " << local_writes_
@@ -537,6 +559,18 @@ class NativeNode final : public rclcpp::Node {
             << ",\n  \"terminal_failure\": " << terminal_failure_
             << ",\n  \"failure\": " << std::quoted(failure_)
             << ",\n  \"last_rejection\": " << std::quoted(last_reject_) << "\n}\n";
+    if (!result_path_.empty()) {
+      std::ofstream sequence(result_path_ + ".model-sequence.json");
+      sequence << '[';
+      bool first = true;
+      for (const auto& entry : run_acceptance_.models()) {
+        if (!first) sequence << ',';
+        first = false;
+        sequence << "{\"model\":" << std::quoted(entry.model) << ",\"epoch\":" << entry.epoch
+                 << '}';
+      }
+      sequence << "]\n";
+    }
     if (!result_path_.empty()) {
       std::ofstream result(result_path_);
       result << summary.str();
