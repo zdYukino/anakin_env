@@ -4,35 +4,22 @@
 
 ## 构建与安装目录
 
-先在共享工作区构建同一份 SDK 和两个消费者：
+各仓库使用原生 CMake，按 SDK → Env/MC 顺序独立构建，无需统一 colcon workspace：
 
 ```sh
-cd /home/zdyukino/workspace/anakin_cpp_ws
-./build.sh -DBUILD_TESTING=ON
+/path/to/anakin_sdk/build.sh
+ANAKIN_SDK_PREFIX=/path/to/anakin_sdk/install/anakin_sdk /path/to/anakin_env/build.sh --test
+python3 /path/to/anakin_mc/scripts/setup_ort.py
+ANAKIN_SDK_PREFIX=/path/to/anakin_sdk/install/anakin_sdk /path/to/anakin_mc/build.sh --test
 ```
 
-两个包也可以分别构建，明确指定同一个已安装 SDK：
+每个包的产物位于自身 `build/包名/`、`install/包名/` 和 `log/`。默认 SDK 前缀是相邻 `../anakin_sdk/install/anakin_sdk`，也可显式指定。构建支持 `--jobs N`、`--build-type TYPE`、`--test` 和 `--` 后的 CMake 选项。
 
-```sh
-cd /home/zdyukino/workspace/anakin_env
-ANAKIN_SDK_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_sdk ./build.sh -DBUILD_TESTING=ON
-cd /home/zdyukino/workspace/anakin_mc
-ANAKIN_SDK_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_sdk ./build.sh -DBUILD_TESTING=ON
-```
+MC 使用固定官方原生 ONNX Runtime 1.20.1，初始化下载并校验到 MC 的 `.deps/`；`ONNXRUNTIME_ROOT` 可指定现有依赖。两个原有 ONNX 模型保留原目录结构，随 MC 安装到 `share/anakin_mc/assets/`，可用 `ANAKIN_LOCO_MODEL`、`ANAKIN_MIMIC_MODEL` 覆盖。模型、动作缩放、历史和过渡算法保持一致。
 
-MC 使用官方原生 ONNX Runtime 1.20.1；可用 `ONNXRUNTIME_ROOT` 指定其目录。`ANAKIN_LOCO_MODEL`、`ANAKIN_MIMIC_MODEL` 可显式指定现有 ONNX 文件，默认仍使用原来的模型。模型、动作缩放、历史和过渡算法未随本次模式配置改写。
+每个包的 `em_run.sh` 只选择本仓库的安装目录。`ANAKIN_PREFIX` 显式指定当前包的安装前缀，`ANAKIN_SDK_PREFIX` 指定 SDK；缺失或损坏的安装直接报错。Env 与 MC 的 `ANAKIN_PREFIX` 应各自设置。
 
-每个包的 `em_run.sh` 优先选择本仓库 `install/包名`；该目录不存在时选择共享工作区 `install/包名`。存在但损坏的独立安装会报错，不会静默改用另一个安装。`ANAKIN_PREFIX` 明确指定当前包的安装前缀，`ANAKIN_SDK_PREFIX` 指定 SDK，`ANAKIN_WS` 指定共享工作区。Env 与 MC 的 `ANAKIN_PREFIX` 应各自设置，不能把 Env 的前缀作为全局 MC 前缀。
-
-例如，要确定运行共享工作区内刚构建的 Env：
-
-```sh
-ANAKIN_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_env \
-ANAKIN_SDK_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_sdk \
-/home/zdyukino/workspace/anakin_env/em_run.sh --sim --input keyboard
-```
-
-共享工作区 `em_run.sh` 是普通 Env 入口的转发文件，遵循相同选择规则，并不强制选择工作区安装。MC 的实际入口为 `/home/zdyukino/workspace/anakin_mc/em_run.sh`；不存在 `anakin_cpp_ws/mc_run.sh`。
+[AnakinC](https://github.com/zdYukino/AnakinC) 通过 submodule 固定三仓版本，其 `boostup.sh`、`build.sh`、`em_run.sh` 分别提供一键初始化、独立编译编排和 ENV + MC 联合启动。父仓启动器默认 sim，保留 Env 前台交互并在退出时清理 MC；本仓单独入口仍默认 real。官方模拟器单独启动。
 
 启动器检查选定 ELF、其本地 ament 包标记、安装资源和 SDK 构建记录。配置默认只来自该 ELF 所在前缀的 `share/anakin_env/config/`，不从当前目录、源码或其他 overlay 补齐。启动器只执行已安装 C++ ELF，不构建、不安装依赖、不需要 Python 运行时。
 

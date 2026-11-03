@@ -11,10 +11,8 @@ read_revision() {
 }
 select_env_binary() {
  local name=$1 installed_revision='' line revision_pattern ignored_pattern
- ws=${ANAKIN_WS:-"$repo/../anakin_cpp_ws"}
- sdk_prefix=${ANAKIN_SDK_PREFIX:-"$ws/install/anakin_sdk"}
- local default_prefix="$ws/install/anakin_env"
- if [[ -d "$repo/install/anakin_env" ]]; then default_prefix="$repo/install/anakin_env"; fi
+ sdk_prefix=${ANAKIN_SDK_PREFIX:-"$repo/../anakin_sdk/install/anakin_sdk"}
+ local default_prefix="$repo/install/anakin_env"
  prefix=${ANAKIN_PREFIX:-"$default_prefix"}
  prefix=$(realpath -e -- "$prefix") || launch_fail "Missing selected Env prefix: $prefix"
  sdk_prefix=$(realpath -e -- "$sdk_prefix") || launch_fail "Missing selected SDK prefix: $sdk_prefix"
@@ -44,9 +42,12 @@ select_env_binary() {
   installed_revision=${BASH_REMATCH[1]}
  done < "$metadata"
  [[ "$installed_revision" == "$sdk_revision" ]] || launch_fail 'Installed SDK revision mismatch'
- export ANAKIN_WS="$ws" ANAKIN_PREFIX="$prefix" ANAKIN_SDK_PREFIX="$sdk_prefix"
+ export ANAKIN_PREFIX="$prefix" ANAKIN_SDK_PREFIX="$sdk_prefix"
  export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-87}
  export ROS_LOCALHOST_ONLY=1 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
- export AMENT_PREFIX_PATH="$sdk_prefix:$prefix:/opt/ros/humble${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
- export LD_LIBRARY_PATH="$sdk_prefix/lib:$prefix/lib:/opt/ros/humble/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+ local ros_prefix=${ROS_PREFIX:-/opt/ros/${ROS_DISTRO:-humble}}
+ local unitree_prefix=${UNITREE_SDK2_PREFIX:-/usr/local}
+ export AMENT_PREFIX_PATH="$sdk_prefix:$prefix:$ros_prefix${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
+ export LD_LIBRARY_PATH="$sdk_prefix/lib:$prefix/lib:$unitree_prefix/lib:$unitree_prefix/lib64:$ros_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+ export ROS_LOG_DIR=${ROS_LOG_DIR:-"$repo/log/ros"}
 }

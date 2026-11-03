@@ -10,7 +10,7 @@ Anakin 的原生 C++ 执行控制模块，作为独立的 ROS 2 Humble 包构建
 ANAKIN_SDK_PREFIX=/path/to/sdk/install/anakin_sdk ./build.sh
 ```
 
-也可以将三个独立仓库链接到 `../anakin_cpp_ws/src`，构建共享工作区。构建需要 ROS 2 Humble，并会检查已安装的 SDK 版本是否与锁定版本一致。
+使用原生 CMake，构建需要 ROS 2 Humble、Unitree SDK2、yaml-cpp、SDL2、X11；无需 colcon workspace。SDK 默认来自相邻 `../anakin_sdk/install/anakin_sdk`，并检查版本锁。产物只进入本仓 `build/anakin_env/`、`install/anakin_env/`、`log/`。`./build.sh --test` 会运行现有离线测试；`--jobs N` 指定并行数。
 
 ## 运行
 
@@ -22,7 +22,9 @@ ANAKIN_SDK_PREFIX=/path/to/sdk/install/anakin_sdk ./build.sh
 
 完整操作步骤、端点、配置覆盖、键位、状态/输出表和用户验收边界见[独立运行说明](docs/standalone-operation.md)。旧 `--loopback-sim` 已移除并明确拒绝。正常入口不启动 MC、模拟器或测试夹具，不自动 reset；MC/Env 持续等待所需的新数据。
 
-启动脚本优先使用本仓库的独立安装目录，否则使用共享工作区的安装目录。可通过 `ANAKIN_PREFIX` 指定安装目录，通过 `ANAKIN_SDK_PREFIX` 指定 SDK。启动前检查选定 ELF、本地包标记、安装 YAML 和 SDK 构建记录；配置与该 ELF 的前缀一致，不从源码或其他 overlay 回退。ROS 默认 domain 87，仅在本机发现节点；仿真 SDK 为 `lo` / domain 31，实机使用配置中的显式网卡 / domain 0。脚本直接运行 C++ 二进制文件，不安装依赖或启动 Python。
+启动脚本使用本仓库的独立安装目录。可通过 `ANAKIN_PREFIX` 指定安装目录，通过 `ANAKIN_SDK_PREFIX` 指定 SDK。启动前检查选定 ELF、本地包标记、安装 YAML 和 SDK 构建记录；配置与该 ELF 的前缀一致。ROS 默认 domain 87，仅在本机发现节点；仿真 SDK 为 `lo` / domain 31，实机使用配置中的显式网卡 / domain 0。脚本直接运行 C++ 二进制文件；ROS 日志默认进入本仓 `log/ros/`。
+
+[AnakinC](https://github.com/zdYukino/AnakinC) 负责固定三个子仓版本及一键初始化、构建和 ENV + MC 联合启动。父仓入口默认 sim；本仓入口仍默认 real。可用 `ROS_PREFIX`、`UNITREE_SDK2_PREFIX` 指定依赖安装前缀。
 
 ## 架构
 
