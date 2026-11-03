@@ -1,0 +1,31 @@
+{
+  "id": "aerospace-telemetry",
+  "name": "aerospace-telemetry",
+  "title": "Aerospace Robotics Telemetry Viewer",
+  "description": "独立机器人遥测工作站：需求对齐、只读 ROS2 MVP 与 DDS/MCAP 分期",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "zdyukino",
+  "assignee": "zdyukino",
+  "createdAt": "2026-11-03",
+  "completedAt": null,
+  "branch": "codex/aerospace-telemetry-viewer",
+  "base_branch": "feat/cpp-runtime",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-03-telemetry-gateway",
+    "11-03-telemetry-robot",
+    "11-03-telemetry-workstation",
+    "11-03-telemetry-playback"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

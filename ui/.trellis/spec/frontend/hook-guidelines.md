@@ -1,0 +1,3 @@
+# Hooks
+App使用useSyncExternalStore订阅telemetry版本，useCallback保持RobotViewer回调稳定，避免每个消息重建WebGL。Importer Worker在effect创建并terminate；loaded回调保持稳定，不能因为父渲染重复解析文件。
+高频数值不存React useState。useEffect清理必须释放定时器、连接或observer。键盘/弹窗焦点在App统一处理。
