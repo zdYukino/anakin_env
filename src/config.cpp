@@ -29,27 +29,20 @@ const Names<EventKind> events{{"emergency_stop", EventKind::EmergencyStop}, {"fa
     {"clear_fault", EventKind::ClearFault}, {"alignment_complete", EventKind::AlignmentComplete},
     {"policy_ready", EventKind::PolicyReady}, {"motion_done", EventKind::MotionDone},
     {"damping_complete", EventKind::DampingComplete}, {"immediate", EventKind::Immediate}};
-const Names<InputSource> sources{{"keyboard", InputSource::Keyboard}, {"gamepad", InputSource::Gamepad},
+const Names<InputSource> sources{{"web", InputSource::Web}, {"gamepad", InputSource::Gamepad},
                                   {"remote", InputSource::Remote}};
 const Names<Trigger> triggers{{"pressed", Trigger::Pressed}, {"held", Trigger::Held},
                               {"released", Trigger::Released}};
 const Names<Button> buttons{{"A", Button::A}, {"B", Button::B}, {"X", Button::X}, {"Y", Button::Y},
     {"Up", Button::Up}, {"Down", Button::Down}, {"Left", Button::Left}, {"Right", Button::Right},
     {"Start", Button::Start}, {"Select", Button::Select}};
-const Names<Key> keys{{"1", Key::Digit1}, {"2", Key::Digit2}, {"3", Key::Digit3},
-    {"4", Key::Digit4}, {"5", Key::Digit5}, {"6", Key::Digit6}, {"Space", Key::Space},
-    {"C", Key::C}, {"W", Key::W}, {"A", Key::A}, {"S", Key::S}, {"D", Key::D}, {"Q", Key::Q},
-    {"E", Key::E}, {"G", Key::G}, {"Up", Key::Up}, {"Down", Key::Down}, {"Left", Key::Left},
-    {"Right", Key::Right}};
 const Names<Axis> axes{{"left_x", Axis::LeftX}, {"left_y", Axis::LeftY},
                        {"right_x", Axis::RightX}, {"right_y", Axis::RightY}};
 const Names<InputAction> input_actions{{"disarmed", InputAction::Disarmed},
     {"damping", InputAction::Damping}, {"align", InputAction::Align}, {"hold", InputAction::Hold},
     {"asap_loco", InputAction::AsapLoco}, {"asap_cr7", InputAction::AsapCr7},
     {"clear_fault", InputAction::ClearFault}, {"emergency_stop", InputAction::EmergencyStop},
-    {"forward", InputAction::Forward}, {"backward", InputAction::Backward}, {"left", InputAction::Left},
-    {"right", InputAction::Right}, {"turn_left", InputAction::TurnLeft},
-    {"turn_right", InputAction::TurnRight}, {"motion_toggle", InputAction::MotionToggle},
+    {"motion_toggle", InputAction::MotionToggle},
     {"height_up", InputAction::HeightUp}, {"height_down", InputAction::HeightDown}};
 
 template <class T> std::string name(T value, const Names<T>& names) {
@@ -322,15 +315,10 @@ void validate_bindings(const Parser& p, const std::vector<InputBinding>& binding
     const auto& binding = bindings[i];
     has_stop = has_stop || binding.action == InputAction::EmergencyStop;
     for (size_t j = 0; j < i; ++j) {
-      bool same = false;
-      if (const auto* key = std::get_if<KeyboardBinding>(&binding.control)) {
-        same = key->key == std::get<KeyboardBinding>(bindings[j].control).key;
-      } else {
-        const auto& button = std::get<ButtonBinding>(binding.control);
-        const auto& other = std::get<ButtonBinding>(bindings[j].control);
-        same = button.button == other.button &&
-               (button.any_shoulders || other.any_shoulders || button.shoulders == other.shoulders);
-      }
+      const auto& button = binding.control;
+      const auto& other = bindings[j].control;
+      const bool same = button.button == other.button &&
+          (button.any_shoulders || other.any_shoulders || button.shoulders == other.shoulders);
       if (same && overlap(binding.trigger, bindings[j].trigger))
         p.fail(element(field, i), "conflicting binding with " + element(field, j));
     }
@@ -360,6 +348,11 @@ std::string to_string(EventKind value) {
   return name(value, events);
 }
 std::string to_string(InputSource value) { return name(value, sources); }
+std::string to_string(InputAction value) { return name(value, input_actions); }
+InputAction input_action(const std::string& value) {
+  for (const auto& item : input_actions) if (item.first == value) return item.second;
+  throw std::invalid_argument("Unknown input action: " + value);
+}
 const std::array<State, 6>& business_states() {
   static const std::array<State, 6> result{State::Disarmed, State::Damping, State::Align,
                                         State::Hold, State::AsapLoco, State::AsapCr7};
@@ -477,11 +470,12 @@ ModeConfig load_mode_config(const std::filesystem::path& path, RuntimeMode expec
 InputConfig load_input_config(const std::filesystem::path& path) {
   const Parser p(path);
   const auto root = p.load();
-  p.object(root, "$", {"schema_version", "primary", "enabled_sources", "keyboard", "gamepad", "remote",
-                       "motion", "keyboard_bindings", "controller_bindings"});
-  p.integer(p.required(root, "schema_version", "$"), "schema_version", 1, 1);
+  p.object(root, "$", {"schema_version", "primary", "enabled_sources", "web", "gamepad", "remote",
+                       "motion", "controller_bindings"});
+  p.integer(p.required(root, "schema_version", "$"), "schema_version", 2, 2);
   InputConfig result;
-  result.primary = p.choice(p.required(root, "primary", "$"), "primary", sources);
+  const auto primary = p.required(root, "primary", "$");
+  if (p.scalar(primary, "primary") != "auto") result.primary = p.choice(primary, "primary", sources);
   const auto enabled = p.required(root, "enabled_sources", "$");
   p.sequence(enabled, "enabled_sources", true);
   for (size_t i = 0; i < enabled.size(); ++i) {
@@ -490,16 +484,41 @@ InputConfig load_input_config(const std::filesystem::path& path) {
       p.fail(element("enabled_sources", i), "duplicate input source");
     result.enabled_sources.push_back(source);
   }
-  if (std::find(result.enabled_sources.begin(), result.enabled_sources.end(), result.primary) == result.enabled_sources.end())
+  if (result.primary && std::find(result.enabled_sources.begin(), result.enabled_sources.end(), *result.primary) == result.enabled_sources.end())
     p.fail("primary", "primary input must be enabled");
-  const auto keyboard = p.required(root, "keyboard", "$");
-  p.object(keyboard, "keyboard", {"command_timeout_ms"});
-  result.keyboard_command_timeout = std::chrono::milliseconds(p.integer(
-      p.required(keyboard, "command_timeout_ms", "keyboard"), "keyboard.command_timeout_ms", 1, 10000));
+  const auto web = p.required(root, "web", "$");
+  p.object(web, "web", {"actions"});
+  const auto web_actions = p.required(web, "actions", "web");
+  p.sequence(web_actions, "web.actions", true);
+  for (size_t i = 0; i < web_actions.size(); ++i) {
+    const auto action = p.choice(web_actions[i], element("web.actions", i), input_actions);
+    if (std::find(result.web_actions.begin(), result.web_actions.end(), action) != result.web_actions.end())
+      p.fail("web.actions", "duplicate action");
+    result.web_actions.push_back(action);
+  }
+  if (std::find(result.web_actions.begin(), result.web_actions.end(), InputAction::EmergencyStop) == result.web_actions.end())
+    p.fail("web.actions", "requires an emergency_stop action");
   const auto gamepad = p.required(root, "gamepad", "$");
-  p.object(gamepad, "gamepad", {"device_index"});
+  p.object(gamepad, "gamepad", {"device_index", "mappings"});
   result.gamepad_device_index = p.integer(p.required(gamepad, "device_index", "gamepad"),
                                             "gamepad.device_index", 0, 255);
+  if (gamepad["mappings"]) {
+    const auto mappings = gamepad["mappings"];
+    p.sequence(mappings, "gamepad.mappings");
+    std::set<std::string> guids;
+    for (size_t i = 0; i < mappings.size(); ++i) {
+      const auto at = element("gamepad.mappings", i);
+      const auto mapping = p.scalar(mappings[i], at);
+      const auto comma = mapping.find(',', 33);
+      if (mapping.size() < 36 || mapping.size() > 4096 || mapping[32] != ',' ||
+          mapping.find_first_of("\r\n") != std::string::npos || mapping.find('\0') != std::string::npos ||
+          mapping.substr(0, 32).find_first_not_of("0123456789abcdef") != std::string::npos ||
+          comma == std::string::npos || comma == 33 || comma + 1 == mapping.size())
+        p.fail(at, "expected a single SDL GUID,name,bindings mapping (lowercase 32-digit GUID)");
+      if (!guids.insert(mapping.substr(0, 32)).second) p.fail(at, "duplicate device GUID");
+      result.gamepad_mappings.push_back(mapping);
+    }
+  }
   const auto remote = p.required(root, "remote", "$");
   p.object(remote, "remote", {"channel"});
   result.remote_channel = p.choice<RemoteChannel>(p.required(remote, "channel", "remote"), "remote.channel",
@@ -523,48 +542,80 @@ InputConfig load_input_config(const std::filesystem::path& path) {
     if (output.scale == 0.) p.fail(field + ".scale", "velocity scale must be nonzero");
     if (!mapped_axes.insert(output.axis).second) p.fail(field + ".axis", "axis already mapped");
   }
-  for (const bool controller : {false, true}) {
-    const std::string field = controller ? "controller_bindings" : "keyboard_bindings";
-    const auto bindings = p.required(root, field, "$");
-    p.sequence(bindings, field, true);
-    auto& output = controller ? result.controller_bindings : result.keyboard_bindings;
-    for (size_t i = 0; i < bindings.size(); ++i) {
-      const auto binding = bindings[i];
-      const auto at = element(field, i);
-      p.object(binding, at, controller ? std::initializer_list<const char*>{"button", "shoulders", "trigger", "action"}
-                                      : std::initializer_list<const char*>{"key", "trigger", "action"});
-      InputBinding value;
-      value.trigger = p.choice(p.required(binding, "trigger", at), at + ".trigger", triggers);
-      value.action = p.choice(p.required(binding, "action", at), at + ".action", input_actions);
-      if (controller) {
-        ButtonBinding button;
-        button.button = p.choice(p.required(binding, "button", at), at + ".button", buttons);
-        const auto shoulders = p.required(binding, "shoulders", at);
-        if (shoulders.IsScalar() && shoulders.Scalar() == "any") {
-          button.any_shoulders = true;
-          if (value.action != InputAction::EmergencyStop)
-            p.fail(at + ".shoulders", "ordinary bindings require an exact shoulder set");
-        } else {
-          p.sequence(shoulders, at + ".shoulders");
-          for (size_t j = 0; j < shoulders.size(); ++j) {
-            const auto shoulder = p.choice<uint8_t>(shoulders[j], element(at + ".shoulders", j),
-                {{"L1", shoulder_l1}, {"R1", shoulder_r1}});
-            if (button.shoulders & shoulder) p.fail(at + ".shoulders", "duplicate shoulder");
-            button.shoulders |= shoulder;
-          }
-        }
-        if (value.action == InputAction::EmergencyStop && value.trigger == Trigger::Released)
-          p.fail(at + ".trigger", "emergency_stop cannot wait for release");
-        value.control = button;
-      } else {
-        if (value.trigger != Trigger::Pressed) p.fail(at + ".trigger", "terminal keys support pressed events only");
-        value.control = KeyboardBinding{p.choice(p.required(binding, "key", at), at + ".key", keys)};
+  const std::string field = "controller_bindings";
+  const auto bindings = p.required(root, field, "$");
+  p.sequence(bindings, field, true);
+  for (size_t i = 0; i < bindings.size(); ++i) {
+    const auto binding = bindings[i];
+    const auto at = element(field, i);
+    p.object(binding, at, {"button", "shoulders", "trigger", "action"});
+    InputBinding value;
+    value.trigger = p.choice(p.required(binding, "trigger", at), at + ".trigger", triggers);
+    value.action = p.choice(p.required(binding, "action", at), at + ".action", input_actions);
+    ButtonBinding button;
+    button.button = p.choice(p.required(binding, "button", at), at + ".button", buttons);
+    const auto shoulders = p.required(binding, "shoulders", at);
+    if (shoulders.IsScalar() && shoulders.Scalar() == "any") {
+      button.any_shoulders = true;
+      if (value.action != InputAction::EmergencyStop)
+        p.fail(at + ".shoulders", "ordinary bindings require an exact shoulder set");
+    } else {
+      p.sequence(shoulders, at + ".shoulders");
+      for (size_t j = 0; j < shoulders.size(); ++j) {
+        const auto shoulder = p.choice<uint8_t>(shoulders[j], element(at + ".shoulders", j),
+            {{"L1", shoulder_l1}, {"R1", shoulder_r1}});
+        if (button.shoulders & shoulder) p.fail(at + ".shoulders", "duplicate shoulder");
+        button.shoulders |= shoulder;
       }
-      output.push_back(value);
     }
-    validate_bindings(p, output, field);
+    if (value.action == InputAction::EmergencyStop && value.trigger == Trigger::Released)
+      p.fail(at + ".trigger", "emergency_stop cannot wait for release");
+    value.control = button;
+    result.controller_bindings.push_back(value);
   }
+  validate_bindings(p, result.controller_bindings, field);
   return result;
+}
+
+std::string input_config_yaml(const InputConfig& config) {
+  YAML::Node root;
+  root["schema_version"] = 2;
+  root["primary"] = config.primary ? name(*config.primary, sources) : "auto";
+  root["enabled_sources"] = YAML::Node(YAML::NodeType::Sequence);
+  for (const auto source : config.enabled_sources) root["enabled_sources"].push_back(name(source, sources));
+  root["web"]["actions"] = YAML::Node(YAML::NodeType::Sequence);
+  for (const auto action : config.web_actions) root["web"]["actions"].push_back(to_string(action));
+  root["gamepad"]["device_index"] = config.gamepad_device_index;
+  root["gamepad"]["mappings"] = YAML::Node(YAML::NodeType::Sequence);
+  for (const auto& mapping : config.gamepad_mappings) root["gamepad"]["mappings"].push_back(mapping);
+  root["remote"]["channel"] = config.remote_channel == RemoteChannel::Lowstate ? "lowstate" : "wireless_topic";
+  auto motion = root["motion"];
+  motion["deadzone"] = config.deadzone;
+  motion["initial_height"] = config.initial_height;
+  motion["height_step"] = config.height_step;
+  size_t i = 0;
+  for (const auto* component : {"forward", "lateral", "yaw"}) {
+    const auto& binding = config.velocity_axes[i++];
+    motion["velocity_axes"][component]["axis"] = name(binding.axis, axes);
+    motion["velocity_axes"][component]["scale"] = binding.scale;
+  }
+  auto list = root["controller_bindings"];
+  list = YAML::Node(YAML::NodeType::Sequence);
+  for (const auto& binding : config.controller_bindings) {
+    YAML::Node item;
+    item["trigger"] = name(binding.trigger, triggers);
+    item["action"] = name(binding.action, input_actions);
+    const auto& button = binding.control;
+    item["button"] = name(button.button, buttons);
+    if (button.any_shoulders) item["shoulders"] = "any";
+    else {
+      item["shoulders"] = YAML::Node(YAML::NodeType::Sequence);
+      if (button.shoulders & shoulder_l1) item["shoulders"].push_back("L1");
+      if (button.shoulders & shoulder_r1) item["shoulders"].push_back("R1");
+    }
+    list.push_back(item);
+  }
+  return YAML::Dump(root);
 }
 
 ConfigPaths resolve_config_paths(RuntimeMode mode, const ResourceOptions& options) {
@@ -582,14 +633,30 @@ ConfigPaths resolve_config_paths(RuntimeMode mode, const ResourceOptions& option
   existing(prefix / "share/ament_index/resource_index/packages/anakin_env", "ament package index");
   const auto directory = prefix / "share/anakin_env/config";
   return {prefix, existing(options.config.value_or(directory / (to_string(mode) + ".yaml")), "mode config"),
-                  existing(options.input_config.value_or(directory / "inputs.yaml"), "input config")};
+                  existing(options.input_config.value_or(directory / "inputs.yaml"), "input config"), std::nullopt};
 }
 
 Configuration load_configuration(RuntimeMode mode, const ResourceOptions& options) {
   Configuration result;
   result.paths = resolve_config_paths(mode, options);
   result.mode = load_mode_config(result.paths.mode, mode);
+  if (options.real_config && !options.real_checks)
+    throw ConfigError("--real-config requires --real-checks");
+  if (options.real_checks) {
+    if (mode != RuntimeMode::Sim) throw ConfigError("--real-checks requires simulation mode");
+    if (result.mode.transport.interface != "lo" || result.mode.transport.sdk_domain == 0)
+      throw ConfigError(result.paths.mode.string() + ": real-checks requires simulation lo and a nonzero SDK domain");
+    const auto checks_path = existing(options.real_config.value_or(
+        result.paths.install_prefix / "share/anakin_env/config/real.yaml"), "real-checks config");
+    auto real = load_mode_config(checks_path, RuntimeMode::Real);
+    real.mode = RuntimeMode::Sim;
+    real.real_checks = true;
+    real.transport = result.mode.transport;
+    result.mode = std::move(real);
+    result.paths.real_checks = checks_path;
+  }
   result.inputs = load_input_config(result.paths.inputs);
+  if (options.automatic_input) result.inputs.primary.reset();
   if (options.primary_input) {
     if (std::find(result.inputs.enabled_sources.begin(), result.inputs.enabled_sources.end(),
                   *options.primary_input) == result.inputs.enabled_sources.end())

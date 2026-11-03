@@ -27,6 +27,7 @@ import {
   Box,
   Cpu,
   Wifi,
+  Gamepad2,
 } from 'lucide-react';
 import { telemetry } from './core/telemetry';
 import { startDemo } from './core/demo';
@@ -36,20 +37,23 @@ import { formatNumber } from './core/format';
 import { numberAt } from './core/types';
 import type { View } from './core/types';
 import { Panel } from './components/Panel';
-import { RobotViewer } from './components/RobotViewer';
+import { ControllerStatus, ControllerBindings } from './components/ControllerStatus';
 import { TelemetryChart } from './components/Chart';
 import { Inspector } from './components/Inspector';
 import { TopicBrowser, FieldBrowser } from './components/TopicBrowser';
 import { Timeline } from './components/Timeline';
 import { ImportDialog } from './components/ImportDialog';
 import { MissionOverview } from './components/MissionOverview';
+import { EventIndicator } from './components/EventIndicator';
+import { switchEventText } from './core/events';
+import { VirtualJoy } from './components/WebControl';
 
 const navigation = [
   { name: 'Overview', icon: LayoutDashboard },
   { name: 'Telemetry', icon: Activity },
   { name: 'Workbench', icon: Columns3 },
   { name: 'Topics', icon: Braces },
-  { name: 'Robotics', icon: Box },
+  { name: 'Controllers', icon: Gamepad2 },
   { name: 'Playback', icon: FileClock },
   { name: 'Diagnostics', icon: ShieldCheck },
   { name: 'Settings', icon: Settings2 },
@@ -59,12 +63,11 @@ const descriptions: Record<View, string> = {
   Workbench: 'Customizable telemetry workspace',
   Topics: 'Discover, inspect and subscribe to message fields',
   Telemetry: 'Synchronized multi-channel signal analysis',
-  Robotics: 'Kinematic state and joint-level instrumentation',
+  Controllers: 'Live Joy and Unitree remote input with runtime YAML bindings',
   Playback: 'Local recordings and historical analysis',
   Diagnostics: 'Transport health, timing and stream events',
   Settings: 'Workspace and acquisition preferences',
 };
-const modeNames = ['DISARMED', 'ALIGNING', 'HOLD', 'ACTIVE', 'DAMPING', 'FAULT', 'PREPARING'];
 
 export default function App() {
   const { t, language, setLanguage } = useI18n();
@@ -76,6 +79,10 @@ export default function App() {
     [importFile, setImportFile] = useState<File | null>(null),
     [toast, setToast] = useState('');
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const [joyOpen, setJoyOpen] = useState(false);
+  useEffect(() => {
+    if (!telemetry.webRequested) setJoyOpen(false);
+  }, [telemetry.webRequested]);
   const [precision, setPrecision] = useState(() => {
     const n = Number(localStorage.getItem('aerospace.precision') ?? '3');
     return Math.max(0, Math.min(8, n || 0));
@@ -96,6 +103,24 @@ export default function App() {
       localStorage.getItem('aerospace.notation') === 'scientific' ? 'scientific' : 'fixed';
     telemetry.startClock();
     return () => telemetry.dispose();
+  }, []);
+  useEffect(() => {
+    const release = () => {
+      telemetry.releaseWeb();
+      setJoyOpen(false);
+      telemetry.emit();
+    };
+    const visibility = () => {
+      if (document.hidden) release();
+    };
+    window.addEventListener('blur', release);
+    window.addEventListener('pagehide', release);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      window.removeEventListener('blur', release);
+      window.removeEventListener('pagehide', release);
+      document.removeEventListener('visibilitychange', visibility);
+    };
   }, []);
   useEffect(() => {
     localStorage.setItem('aerospace.precision', String(precision));
@@ -239,9 +264,7 @@ export default function App() {
   const notify = (text: string) => setToast(text);
   const data = (telemetry.at('/anakin/state') || telemetry.at())?.data,
     joints = findJoints(data);
-  const height = validGroup(data, 16) ? numberAt(data, 'odometry.pose.pose.position.z') : undefined,
-    gyro = validGroup(data, 2) ? numberAt(data, 'imu.angular_velocity.x') : undefined;
-  const execution = numberAt(data, 'execution_mode');
+  const height = validGroup(data, 16) ? numberAt(data, 'odometry.pose.pose.position.z') : undefined;
   const statusClass =
     telemetry.source === 'demo' && telemetry.connection !== 'ERROR'
       ? 'demo'
@@ -298,7 +321,7 @@ export default function App() {
       if (rect)
         setLayout((l) => ({
           ...l,
-          robotWidth: Math.min(48, Math.max(23, ((e.clientX - rect.left) / rect.width) * 100)),
+          columnWidth: Math.min(75, Math.max(25, ((e.clientX - rect.left) / rect.width) * 100)),
         }));
     };
     const up = () => {
@@ -316,7 +339,7 @@ export default function App() {
       key={id}
       id={id}
       title={t(PANEL_NAMES[id])}
-      tag={id === 'robot' ? 'G1' : id === 'trend' ? 'POSITION' : undefined}
+      tag={id === 'trend' ? 'POSITION' : undefined}
       collapsed={layout.collapsed.includes(id)}
       maximized={maximized === id}
       onToggle={() => togglePanel(id)}
@@ -332,40 +355,6 @@ export default function App() {
         ) : undefined
       }
     >
-      {id === 'robot' && (
-        <>
-          <RobotViewer onJoint={jointSelected} />
-          <div className="robot-summary">
-            <div>
-              <span>{t('BASE HEIGHT')}</span>
-              <strong>
-                {values(height)}
-                <small>m</small>
-              </strong>
-            </div>
-            <div>
-              <span>{t('JOINT FEEDBACK')}</span>
-              <strong>
-                {joints?.position.length ?? '—'}
-                <small>/ 29</small>
-              </strong>
-            </div>
-            <div>
-              <span>{t('ANGULAR RATE / X')}</span>
-              <strong>
-                {values(gyro)}
-                <small>rad/s</small>
-              </strong>
-            </div>
-            <div>
-              <span>{t('EXECUTION STATE')}</span>
-              <strong className="text-readout">
-                {t(execution !== undefined ? modeNames[execution] || 'UNKNOWN' : 'AWAITING')}
-              </strong>
-            </div>
-          </div>
-        </>
-      )}
       {id === 'trend' && (
         <TelemetryChart
           channels={positionChannels}
@@ -480,8 +469,35 @@ export default function App() {
             <Link2 size={13} />
             {telemetry.source === 'none' ? t('Connect source') : t('Data source')}
           </button>
+          {telemetry.source === 'ros2' &&
+            ['CONNECTED', 'DEGRADED'].includes(telemetry.connection) && (
+              <button
+                className={`mission-web-control ${telemetry.webActive ? 'active' : ''}`}
+                aria-pressed={telemetry.webRequested}
+                disabled={
+                  !telemetry.webRequested &&
+                  (!telemetry.canWebControl || Boolean(telemetry.control?.leased))
+                }
+                title={t(
+                  telemetry.control?.leased && !telemetry.webRequested
+                    ? 'Another browser holds web control'
+                    : 'Web control',
+                )}
+                onClick={() => {
+                  if (telemetry.webRequested) {
+                    telemetry.releaseWeb();
+                    setJoyOpen(false);
+                    telemetry.emit();
+                  } else telemetry.activateWeb();
+                }}
+              >
+                <Gamepad2 size={14} />
+                {t(telemetry.webRequested ? 'Disable web control' : 'Web control')}
+              </button>
+            )}
         </div>
       </header>
+      {joyOpen && telemetry.webActive && <VirtualJoy onClose={() => setJoyOpen(false)} />}
       <main className={`main-workspace ${view === 'Overview' ? 'overview-workspace' : ''}`}>
         {view !== 'Overview' && (
           <div className="workspace-heading">
@@ -536,7 +552,14 @@ export default function App() {
             </button>
           </div>
         )}
-        {view === 'Overview' && <MissionOverview onJoint={jointSelected} precision={precision} />}
+        {view === 'Overview' && (
+          <MissionOverview
+            onJoint={jointSelected}
+            precision={precision}
+            onJoy={() => setJoyOpen((open) => !open)}
+            joyOpen={joyOpen}
+          />
+        )}
         {view === 'Workbench' && (
           <>
             <div className="metric-strip">
@@ -628,7 +651,7 @@ export default function App() {
               className="workspace-grid"
               style={
                 {
-                  '--robot-width': `${layout.robotWidth}%`,
+                  '--column-width': `${layout.columnWidth}%`,
                   ...(gridHeight ? { gridTemplateRows: `${rowPixels}px minmax(151px,1fr)` } : {}),
                 } as React.CSSProperties
               }
@@ -637,18 +660,18 @@ export default function App() {
               <div
                 className="column-resizer"
                 role="separator"
-                aria-label={t('Resize robot column')}
+                aria-label={t('Resize workspace columns')}
                 aria-orientation="vertical"
                 tabIndex={0}
-                style={{ left: `calc(${layout.robotWidth}% + 1px)` }}
+                style={{ left: `calc(${layout.columnWidth}% + 1px)` }}
                 onPointerDown={startResize}
                 onKeyDown={(e) => {
                   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
                     setLayout((l) => ({
                       ...l,
-                      robotWidth: Math.min(
-                        48,
-                        Math.max(23, l.robotWidth + (e.key === 'ArrowLeft' ? -1 : 1)),
+                      columnWidth: Math.min(
+                        75,
+                        Math.max(25, l.columnWidth + (e.key === 'ArrowLeft' ? -1 : 1)),
                       ),
                     }));
                 }}
@@ -672,7 +695,7 @@ export default function App() {
                     }));
                 }}
               />
-              {layout.hidden.length === 5 && (
+              {layout.hidden.length === Object.keys(PANEL_NAMES).length && (
                 <div className="empty-state">
                   {t('All views removed. Use Add view to restore a panel.')}
                 </div>
@@ -710,49 +733,7 @@ export default function App() {
             <ChannelTable precision={precision} />
           </div>
         )}
-        {view === 'Robotics' && (
-          <div className="full-view robotics-view">
-            <Panel id="robot-large" title={t('KINEMATIC STATE')} tag={t('UNITREE G1 · 29 DOF')}>
-              <RobotViewer onJoint={jointSelected} />
-            </Panel>
-            <Panel
-              id="joints"
-              title={t('JOINT INSTRUMENTATION')}
-              tag={joints ? 'NAMED MAPPING' : 'AWAITING'}
-            >
-              <div className="table-scroll">
-                <table className="data-table joint-table">
-                  <thead>
-                    <tr>
-                      <th>{t('JOINT')}</th>
-                      <th>q / rad</th>
-                      <th>dq / rad·s⁻¹</th>
-                      <th>τ / N·m</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {joints?.name.map((name, i) => (
-                      <tr key={t(name)} onClick={() => jointSelected(name)}>
-                        <td>
-                          <code>{name.replace('_joint', '')}</code>
-                        </td>
-                        <td>{values(joints.position[i])}</td>
-                        <td>{values(joints.velocity[i])}</td>
-                        <td>{values(joints.effort[i])}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {!joints && (
-                  <div className="empty-state">
-                    <Box size={20} />
-                    <span>{t('Waiting for named joint feedback')}</span>
-                  </div>
-                )}
-              </div>
-            </Panel>
-          </div>
-        )}
+        {view === 'Controllers' && <ControllerStatus precision={precision} />}
         {view === 'Playback' && (
           <div className="full-view playback-view">
             {telemetry.source === 'file' ? (
@@ -883,7 +864,15 @@ export default function App() {
                             {log.level}
                           </span>
                         </td>
-                        <td>{t(log.text)}</td>
+                        <td title={log.controlEvent?.detail}>
+                          {log.controlEvent ? switchEventText(log.controlEvent, t) : t(log.text)}
+                          {log.controlEvent && (
+                            <small className="event-detail">
+                              {t('Current state')}: {t(log.controlEvent.current)} ·{' '}
+                              {t(log.controlEvent.detail)}
+                            </small>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1056,7 +1045,7 @@ export default function App() {
                 <h3>
                   Aerospace Robotics Telemetry Viewer <span>0.1.0</span>
                 </h3>
-                <p>{t('Read-only engineering workstation · ROS2 gateway v1 · G1 29 DOF')}</p>
+                <p>{t('Engineering workstation · ROS2 gateway v1 · G1 29 DOF')}</p>
                 <p>
                   {t('Native DDS and MCAP are scheduled for later phases. Startup instructions:')}{' '}
                   <code>ui/README.md</code>.
@@ -1066,7 +1055,15 @@ export default function App() {
           </div>
         )}
       </main>
-      {view !== 'Overview' && layout.inspector && (
+      {view === 'Controllers' && layout.inspector && (
+        <ControllerBindings
+          onClose={() => {
+            setLayout((l) => ({ ...l, inspector: false }));
+            setMobileInspectorOpen(false);
+          }}
+        />
+      )}
+      {view !== 'Overview' && view !== 'Controllers' && layout.inspector && (
         <Inspector
           precision={precision}
           onClose={() => {
@@ -1083,7 +1080,7 @@ export default function App() {
       <nav className="mission-navigation" aria-label={t('Workspace navigation')}>
         <div className="navigation-context">
           <span>G1 / SYSTEM</span>
-          <strong>{t('READ ONLY')}</strong>
+          <strong>{t(telemetry.webActive ? 'WEB CONTROL' : 'READ ONLY')}</strong>
         </div>
         <div className="mission-nav-items">
           {navigation.map(({ name, icon: Icon }, index) => (
@@ -1103,10 +1100,7 @@ export default function App() {
             </button>
           ))}
         </div>
-        <div className="navigation-time">
-          <span>{t('VIEW MODE')}</span>
-          <strong>{t(telemetry.mode)}</strong>
-        </div>
+        <EventIndicator onOpen={() => setView('Diagnostics')} />
       </nav>
       {!layout.inspector && view !== 'Overview' && view !== 'Workbench' && (
         <button
@@ -1173,7 +1167,7 @@ export default function App() {
               <div className="source-connect-actions">
                 <span>
                   <ShieldCheck size={11} />
-                  {t('READ-ONLY CONNECTION')}
+                  {t('TELEMETRY CONNECTION')}
                 </span>
                 {telemetry.source === 'ros2' && (
                   <button

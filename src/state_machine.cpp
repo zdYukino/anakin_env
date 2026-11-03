@@ -143,13 +143,9 @@ ActionPlan StateMachine::dispatch(const std::vector<Event>& events) {
   auto fallback = plan(Decision::NoEvent);
   for (const auto& event : ordered) {
     if (event.kind == EventKind::SourceLost) {
-      if (config_.guards.source_loss == SourceLossPolicy::ZeroMotionKeepMode) {
-        auto result = plan(Decision::Accepted, event.kind);
-        result.actions.push_back({Action::ZeroMotion, snapshot_.state, result.model});
-        return result;
-      }
-      const auto* selected = route(config_.system_transitions, EventKind::Fault);
-      if (selected) return transition(*selected, event);
+      auto result = plan(Decision::Accepted, event.kind);
+      result.actions.push_back({Action::ZeroMotion, snapshot_.state, result.model});
+      return result;
     } else if (event.kind == EventKind::ManualRequest) {
       if (snapshot_.state != State::Fault && event.requested_state &&
           is_business_state(*event.requested_state)) {

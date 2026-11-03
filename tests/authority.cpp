@@ -137,6 +137,23 @@ struct Setup {
 
 void authority_contracts() {
   {
+    std::vector<LowCommand> writes;
+    RealBackend simulated(make_simulated_motion_switcher(), [&](const LowCommand& command) {
+      writes.push_back(command);
+      return true;
+    });
+    check(!simulated.authority_owned() && writes.empty(), "Simulated authority starts unowned");
+    simulated.begin_acquire(1, 3000ms);
+    until([&] { return simulated.poll_acquire(1) != AuthorityProgress::Pending; }, "simulated authority result");
+    check(simulated.poll_acquire(1) == AuthorityProgress::Owned && simulated.authority_owned() &&
+          simulated.authority_record().observed_empty,
+          "Loopback substitute follows the real asynchronous authority workflow");
+    check(simulated.write(encode_policy_pd(stand_pose(), 5)), "Simulated owned backend writes to its supplied sink");
+    simulated.release_authority();
+    check(!simulated.authority_owned() && writes.size() == 2 && writes.back().motor_cmd()[0].kp() == 0,
+          "Simulated authority releases through the real backend zero-gain path");
+  }
+  {
     Setup f;
     check(!f.backend->authority_owned() && f.script->factories == 0 && f.script->commands.empty(), "Backend construction is fully inert");
     check(!f.backend->write(encode_release(5)), "Readonly backend cannot send its first release packet");
@@ -352,6 +369,25 @@ struct ControlSetup {
 };
 void lifecycle(const fs::path& configs) {
   const auto config = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
+  {
+    auto checked_sim = config;
+    checked_sim.mode = RuntimeMode::Sim;
+    checked_sim.real_checks = true;
+    ControlSetup f(checked_sim);
+    check(f.step({Event::manual(State::AsapLoco)}).decision == Decision::Rejected &&
+          f.setup.script->factories == 0 && f.setup.script->commands.empty(),
+          "Loopback with real checks starts disarmed and rejects real-state shortcuts");
+    check(f.step({Event::manual(State::Align)}).decision == Decision::Accepted,
+          "Loopback real-checks alignment is explicitly requested");
+    f.alignment();
+    check(f.setup.backend->authority_owned() && f.setup.script->factories == 1 &&
+          f.setup.script->commands.front().motor_cmd()[0].kp() > 0,
+          "Loopback real-checks runs asynchronous authority before alignment writes");
+    f.step({Event::system(EventKind::SourceLost)});
+    check(f.core.snapshot().state == State::Align && f.setup.backend->authority_owned() &&
+          f.setup.script->commands.back().motor_cmd()[0].kp() > 0,
+          "Loopback real-checks retains authority and alignment on source loss");
+  }
   {
     ControlSetup f(config);
     for (const auto request : {State::Hold, State::AsapLoco, State::AsapCr7})

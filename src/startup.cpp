@@ -19,20 +19,28 @@ StartupOptions parse_startup(const std::vector<std::string>& arguments) {
       if (selected_mode) throw ConfigError(flag + ": conflicting mode selection");
       result.mode = flag == "--sim" ? RuntimeMode::Sim : RuntimeMode::Real;
       selected_mode = true;
-    } else if (flag == "--config" || flag == "--input-config" || flag == "--input") {
+    } else if (flag == "--real-checks") {
+      result.resources.real_checks = true;
+    } else if (flag == "--config" || flag == "--input-config" || flag == "--real-config" || flag == "--input") {
       if (++i >= arguments.size() || arguments[i].empty() || arguments[i].front() == '-')
         throw ConfigError(flag + ": missing value");
       if (flag == "--config") result.resources.config = arguments[i];
       else if (flag == "--input-config") result.resources.input_config = arguments[i];
+      else if (flag == "--real-config") result.resources.real_config = arguments[i];
       else {
         const auto& source = arguments[i];
-        if (source == "keyboard") result.resources.primary_input = InputSource::Keyboard;
+        if (source == "auto") result.resources.automatic_input = true;
+        else if (source == "web") result.resources.primary_input = InputSource::Web;
         else if (source == "gamepad") result.resources.primary_input = InputSource::Gamepad;
         else if (source == "remote") result.resources.primary_input = InputSource::Remote;
-        else throw ConfigError("--input: expected keyboard, gamepad or remote");
+        else throw ConfigError("--input: expected auto, web, gamepad or remote");
       }
     } else throw ConfigError(flag + ": unknown option");
   }
+  if (result.resources.real_checks && result.mode != RuntimeMode::Sim)
+    throw ConfigError("--real-checks requires --sim");
+  if (result.resources.real_config && !result.resources.real_checks)
+    throw ConfigError("--real-config requires --real-checks");
   return result;
 }
 }  // namespace anakin::env

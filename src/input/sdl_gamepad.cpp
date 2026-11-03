@@ -6,6 +6,7 @@ namespace anakin::env {
 struct SdlGamepad::Impl {
   int device_index;
   SDL_GameController* controller = nullptr;
+  std::shared_ptr<const GamepadDevice> device;
   explicit Impl(int index) : device_index(index) {
     if (index < 0) throw std::invalid_argument("Gamepad device index must be nonnegative");
     // No video subsystem/window. State is polled explicitly, even without changes.
@@ -19,7 +20,12 @@ struct SdlGamepad::Impl {
   }
 };
 
-SdlGamepad::SdlGamepad(int device_index) : impl_(std::make_unique<Impl>(device_index)) {}
+SdlGamepad::SdlGamepad(int device_index, const std::vector<std::string>& mappings)
+    : impl_(std::make_unique<Impl>(device_index)) {
+  for (const auto& mapping : mappings)
+    if (SDL_GameControllerAddMapping(mapping.c_str()) < 0)
+      throw std::runtime_error("Cannot load configured SDL mapping: " + std::string(SDL_GetError()));
+}
 SdlGamepad::~SdlGamepad() = default;
 
 InputSample SdlGamepad::poll(InputTime now) {
@@ -35,6 +41,7 @@ InputSample SdlGamepad::poll(InputTime now) {
   if (impl_->controller && !SDL_GameControllerGetAttached(impl_->controller)) {
     SDL_GameControllerClose(impl_->controller);
     impl_->controller = nullptr;
+    impl_->device.reset();
     // Report an offline sample once before selecting a replacement device.
     return sample;
   }
@@ -43,9 +50,20 @@ InputSample SdlGamepad::poll(InputTime now) {
     impl_->controller = SDL_GameControllerOpen(impl_->device_index);
     if (!impl_->controller)
       throw std::runtime_error("Cannot open SDL gamepad: " + std::string(SDL_GetError()));
+    auto info = std::make_shared<GamepadDevice>();
+    if (const auto* name = SDL_GameControllerName(impl_->controller)) info->name = name;
+    char guid[33];
+    SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(impl_->device_index), guid, sizeof(guid));
+    info->guid = guid;
+    if (auto* mapping = SDL_GameControllerMapping(impl_->controller)) {
+      info->mapping = mapping;
+      SDL_free(mapping);
+    }
+    impl_->device = std::move(info);
   }
   if (!impl_->controller) return sample;
   sample.connected = SDL_GameControllerGetAttached(impl_->controller);
+  sample.device = impl_->device;
   sample.connection = static_cast<uint64_t>(SDL_JoystickInstanceID(
       SDL_GameControllerGetJoystick(impl_->controller))) + 1;
   const std::array<std::pair<Button, SDL_GameControllerButton>, input_button_count> buttons{{
@@ -68,6 +86,12 @@ InputSample SdlGamepad::poll(InputTime now) {
     sample.axes[i] = static_cast<float>(value) / (value < 0 ? 32768.f : 32767.f);
   }
   sample.axes[1] = -sample.axes[1];  // SDL up is negative; logical forward is positive.
+  if (SDL_GameControllerHasAxis(impl_->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) &&
+      SDL_GameControllerHasAxis(impl_->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+    sample.triggers = std::array<float, 2>{
+        static_cast<float>(SDL_GameControllerGetAxis(impl_->controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT)) / 32767.f,
+        static_cast<float>(SDL_GameControllerGetAxis(impl_->controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) / 32767.f};
+  }
   return sample;
 }
 }  // namespace anakin::env

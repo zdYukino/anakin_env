@@ -612,7 +612,7 @@ small {
 .workspace-grid {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(200px, var(--robot-width)) minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(200px, var(--column-width)) minmax(0, 1fr);
   grid-template-rows: minmax(210px, 1.25fr) minmax(155px, 0.85fr);
   gap: 11px;
   flex: 1;
@@ -623,7 +623,7 @@ small {
   grid-row: 1;
 }
 .slot-1 {
-  grid-column: 2/4;
+  grid-column: 2;
   grid-row: 1;
 }
 .slot-2 {
@@ -632,10 +632,6 @@ small {
 }
 .slot-3 {
   grid-column: 2;
-  grid-row: 2;
-}
-.slot-4 {
-  grid-column: 3;
   grid-row: 2;
 }
 .column-resizer {
@@ -2507,7 +2503,7 @@ small {
     display: none;
   }
   .workspace-grid {
-    grid-template-columns: minmax(190px, var(--robot-width)) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(190px, var(--column-width)) minmax(0, 1fr);
   }
   .topics-view .field-list {
     grid-template-columns: 1fr;
@@ -3672,6 +3668,515 @@ select {
 .mobile-inspector-button {
   display: none;
 }
+.controller-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.controller-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 16px;
+  color: #a8b4b5;
+  font-size: 11px;
+}
+.controller-notice > span {
+  margin-left: auto;
+  color: #6d7b7d;
+  font:
+    9px 'IBM Plex Mono',
+    monospace;
+}
+.controller-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.controller-card {
+  min-width: 0;
+  border: 1px solid #303436;
+  background: #101314;
+  padding: 16px;
+}
+.controller-card > header,
+.controller-card > header > div,
+.controller-facts,
+.controller-card > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.controller-card > header {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.controller-card > header > div {
+  justify-content: flex-start;
+}
+.controller-card h2 {
+  font-size: 16px;
+  margin: 5px 0 0;
+  font-weight: 500;
+}
+.controller-card > header > div span,
+.controller-facts,
+.controller-stick > span,
+.controller-card > footer {
+  font:
+    10px 'IBM Plex Mono',
+    monospace;
+  color: #879294;
+}
+.input-badge {
+  font:
+    9px 'IBM Plex Mono',
+    monospace;
+  color: #a5a9a7;
+  border: 1px solid #414647;
+  padding: 5px 7px;
+}
+.input-badge.live {
+  color: #8ed3ad;
+  border-color: #37604b;
+}
+.controller-facts {
+  margin-top: 12px;
+  border-top: 1px solid #272d2e;
+  padding-top: 10px;
+}
+.controller-sticks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 12px 0;
+  gap: 16px;
+}
+.controller-stick {
+  text-align: center;
+}
+.controller-stick svg {
+  display: block;
+  width: 100%;
+  max-width: 100px;
+  margin: auto auto 8px;
+}
+.stick-ring,
+.stick-inner {
+  fill: #151b1d;
+  stroke: #384347;
+  stroke-width: 0.7;
+}
+.stick-inner {
+  fill: none;
+  stroke: #263237;
+}
+.stick-cross {
+  stroke: #384347;
+  stroke-width: 0.5;
+}
+.stick-vector {
+  stroke: #9dc9bd;
+  stroke-width: 1;
+}
+.stick-position {
+  fill: #a0d3bf;
+  stroke: #263f36;
+  stroke-width: 3;
+}
+.controller-axes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid #272d2e;
+  border-bottom: 1px solid #272d2e;
+}
+.controller-axes > div,
+.input-axis-config > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font:
+    11px 'IBM Plex Mono',
+    monospace;
+}
+.controller-axes dt {
+  color: #899699;
+}
+.controller-axes dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.controller-buttons {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin: 12px 0;
+}
+.controller-buttons > span {
+  border: 1px solid #3b4648;
+  padding: 6px 0;
+  text-align: center;
+  font:
+    10px 'IBM Plex Mono',
+    monospace;
+  color: #aebbbd;
+}
+.controller-buttons > .pressed {
+  background: #29483b;
+  border-color: #85b7a0;
+  color: #d9f6e8;
+}
+.controller-buttons > .unavailable {
+  color: #566064;
+  border-color: #262d2f;
+}
+.controller-triggers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 12px;
+}
+.controller-triggers > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font:
+    10px 'IBM Plex Mono',
+    monospace;
+}
+.controller-triggers code {
+  min-width: 28px;
+  text-align: right;
+  color: #aabbb7;
+}
+.trigger-track {
+  height: 5px;
+  flex: 1;
+  overflow: hidden;
+  background: #273331;
+}
+.trigger-track i {
+  display: block;
+  height: 100%;
+  background: #97c8ae;
+}
+.controller-device {
+  font-size: 10px;
+  color: #8d989a;
+  margin: 12px 0;
+}
+.controller-device summary {
+  cursor: pointer;
+}
+.controller-device code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 9px;
+  line-height: 1.7;
+  margin-top: 7px;
+}
+@media (max-height: 850px) {
+  .controller-card {
+    padding: 12px;
+  }
+  .controller-notice {
+    padding-bottom: 12px;
+  }
+  .controller-facts {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+  .controller-sticks {
+    margin: 8px 0;
+  }
+  .controller-stick svg {
+    max-width: 70px;
+  }
+  .controller-axes {
+    padding: 8px 0;
+  }
+  .controller-buttons,
+  .controller-device {
+    margin: 8px 0;
+  }
+  .controller-card > footer {
+    padding-top: 8px;
+  }
+}
+.navigation-event {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  flex: 0 0 clamp(200px, 23vw, 330px);
+  min-width: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-left: 1px solid #292e2d;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.navigation-event > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font:
+    8px 'IBM Plex Mono',
+    monospace;
+  color: #8b9a96;
+}
+.navigation-event time {
+  margin-left: auto;
+  font-size: 8px;
+}
+.navigation-event strong {
+  display: flex;
+  width: 100%;
+  margin-top: 7px;
+  color: #bbc8c5;
+  font-size: 10px;
+  font-weight: 400;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.navigation-event strong > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.navigation-event strong > em {
+  flex-shrink: 0;
+  font-style: normal;
+}
+.log-table td:last-child {
+  white-space: normal;
+}
+.event-detail {
+  display: block;
+  color: #81918a;
+  font-size: 10px;
+  line-height: 1.6;
+  margin-top: 5px;
+}
+.navigation-event:hover {
+  background: #151c19;
+}
+.navigation-event.success strong {
+  color: #9bd1b1;
+}
+.navigation-event.pending strong {
+  color: #d9bd82;
+}
+.navigation-event.failed strong,
+.navigation-event.error strong {
+  color: #e78f8f;
+}
+.navigation-event.cancelled strong,
+.navigation-event.warn strong {
+  color: #d0bba1;
+}
+@media (max-width: 1100px) {
+  .navigation-context {
+    width: 100px;
+  }
+  .mission-nav-items {
+    min-width: 0;
+    flex: 1;
+    overflow-x: auto;
+    justify-content: flex-start;
+  }
+  .mission-nav-items button {
+    flex-shrink: 0;
+  }
+}
+@media (max-width: 760px) {
+  .mission-navigation {
+    overflow: hidden;
+  }
+  .mission-nav-items {
+    min-width: 0;
+    flex: 1;
+    overflow-x: auto;
+    margin: 0;
+  }
+  .mission-nav-items button {
+    flex-shrink: 0;
+  }
+  .navigation-event {
+    flex-basis: 145px;
+    padding: 7px 10px;
+  }
+  .navigation-event > span {
+    font-size: 7px;
+  }
+  .navigation-event strong {
+    font-size: 9px;
+  }
+}
+.controller-card > footer {
+  border-top: 1px solid #272d2e;
+  padding-top: 12px;
+}
+.controller-hint {
+  color: #849092;
+  font-size: 11px;
+  margin-top: 16px;
+}
+.input-bindings {
+  overflow-y: auto;
+}
+.input-bindings > header {
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  background: #0c0d0e;
+  z-index: 1;
+}
+.input-config-source,
+.input-binding-section,
+.input-axis-config,
+.input-config-note {
+  margin: 0;
+  padding: 16px;
+  border-bottom: 1px solid #272d2e;
+}
+.input-config-source > code,
+.input-config-source details > code,
+.input-config-source details > span {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.7;
+  margin-top: 8px;
+}
+.input-config-source dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  font-size: 10px;
+  margin: 16px 0 12px;
+}
+.input-config-source dd {
+  margin: 0;
+  font-family: 'IBM Plex Mono', monospace;
+}
+.input-config-source p,
+.input-binding-section > p,
+.input-config-note {
+  font-size: 10px;
+  line-height: 1.7;
+  color: #8d989a;
+}
+.input-binding-section h3,
+.input-axis-config h3 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.07em;
+}
+.input-binding-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.input-binding-list li {
+  padding: 12px 0;
+  border-bottom: 1px solid #232a2c;
+}
+.input-binding-list li:last-child {
+  border: 0;
+  padding-bottom: 0;
+}
+.binding-combination,
+.binding-combination > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.binding-combination {
+  flex-wrap: wrap;
+}
+.binding-combination small {
+  color: #657579;
+}
+.binding-combination kbd {
+  padding: 3px 5px;
+  border: 1px solid #465357;
+  color: #d0dcde;
+  font:
+    10px 'IBM Plex Mono',
+    monospace;
+}
+.binding-combination em {
+  margin-left: auto;
+  font-size: 9px;
+  color: #92ada6;
+  font-style: normal;
+}
+.binding-action {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+.binding-action strong {
+  font-size: 11px;
+  font-weight: 400;
+}
+.binding-action > span {
+  font-size: 8px;
+  color: #738386;
+}
+.input-bindings summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #b9c7c9;
+}
+.input-axis-config {
+  display: grid;
+  gap: 12px;
+}
+.input-axis-config > span {
+  font-size: 10px;
+  color: #8d989a;
+}
+.input-axis-config > div {
+  font-size: 10px;
+}
+.input-config-empty {
+  padding: 30px 16px;
+  color: #8d989a;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.input-config-empty strong {
+  display: block;
+  margin-top: 12px;
+  color: #b3bfc1;
+}
+.input-config-empty code {
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1060px) {
+  .controller-grid {
+    grid-template-columns: 1fr;
+  }
+  .controller-sticks {
+    margin: 12px 0;
+  }
+  .controller-stick svg {
+    max-width: 110px;
+  }
+}
 @media (max-width: 760px) {
   .workspace-actions .mobile-inspector-button {
     display: inline-flex;
@@ -3688,5 +4193,292 @@ select {
   }
   .inspector-reopen {
     display: none;
+  }
+}
+
+.mission-web-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 11px;
+  border: 1px solid #424a4a;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.mission-web-control.active {
+  color: var(--green);
+  border-color: #4c9d7b;
+  background: #17332a;
+}
+.mission-joints.web-control-panel {
+  overflow-y: auto;
+  gap: 12px;
+  padding-top: 28px;
+}
+.web-control-panel .mission-section-heading {
+  flex-shrink: 0;
+  padding-bottom: 14px;
+}
+.web-control-summary {
+  display: grid;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.web-control-summary > span,
+.web-control-motion-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.web-control-summary b {
+  color: #e3e9e8;
+  font-weight: 500;
+  font-family: 'IBM Plex Mono', monospace;
+}
+.web-control-summary > small {
+  color: var(--accent);
+  font-size: 9px;
+}
+.web-state-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.web-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  border: 1px solid #363c3f;
+  background: #161b1d;
+  border-radius: 3px;
+  padding: 11px 9px;
+  min-width: 0;
+  font-size: 11px;
+  text-align: left;
+}
+.web-action.available {
+  color: #aff2d4;
+  background: #172d25;
+  border-color: #4a8b6e;
+  box-shadow: inset 0 0 14px #55bf9110;
+}
+.web-action.available:hover {
+  background: #254c3c;
+}
+.web-action:disabled {
+  color: #7d8588;
+  background: #15191b;
+  opacity: 0.55;
+}
+.web-action.emergency {
+  border-color: #b45c60;
+  color: #ffb4b8;
+  background: #3c2025;
+}
+.web-motion-actions {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr 1fr;
+}
+.web-motion-actions > :first-child {
+  grid-column: 1 / -1;
+}
+.web-control-motion-state {
+  color: var(--muted);
+  font-size: 10px;
+}
+.web-control-motion-state b {
+  font-family: 'IBM Plex Mono', monospace;
+  color: #d5dedb;
+}
+.web-joy-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #536b77;
+  background: #17222a;
+  border-radius: 3px;
+}
+.web-control-note,
+.web-control-message {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.web-control-message {
+  color: var(--amber);
+}
+.virtual-joy {
+  position: fixed;
+  z-index: 45;
+  width: min(420px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  border: 1px solid #53656d;
+  border-radius: 7px;
+  background: #12191ff5;
+  box-shadow: 0 18px 60px #000b;
+  padding: 0 18px 12px;
+  user-select: none;
+}
+.virtual-joy > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 -18px 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #35434b;
+  background: #1b262f;
+  cursor: move;
+  touch-action: none;
+}
+.virtual-joy > header strong {
+  flex: 1;
+  font-weight: 500;
+}
+.virtual-joy > header button {
+  display: flex;
+  padding: 4px;
+}
+.virtual-joy-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
+  font-size: 10px;
+}
+.virtual-joy-source i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.virtual-joy-source > span {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 9px;
+}
+.virtual-joy-shoulders {
+  display: flex;
+  justify-content: space-between;
+  margin: 13px 0 6px;
+}
+.virtual-joy-shoulders button,
+.virtual-joy-buttons button,
+.virtual-joy-system button {
+  border: 1px solid #435662;
+  border-radius: 5px;
+  background: #1e2b35;
+  min-height: 32px;
+  padding: 7px 16px;
+  touch-action: none;
+}
+.virtual-joy button[aria-pressed='true'] {
+  background: #315c52;
+  border-color: #72c9a6;
+  color: #caffeb;
+}
+.virtual-joy-sticks {
+  display: flex;
+  justify-content: space-around;
+  gap: 26px;
+}
+.virtual-stick-group {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+.virtual-stick-group small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.virtual-stick {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  border: 1px solid #44565e;
+  background: radial-gradient(circle, #243641 0%, #142029 65%);
+  touch-action: none;
+}
+.virtual-stick::before,
+.virtual-stick::after {
+  content: '';
+  position: absolute;
+  background: #3c525d;
+  opacity: 0.5;
+}
+.virtual-stick::before {
+  width: 1px;
+  height: 100%;
+  left: 50%;
+}
+.virtual-stick::after {
+  height: 1px;
+  width: 100%;
+  top: 50%;
+}
+.virtual-stick > span {
+  position: absolute;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  left: calc(50% - 17px);
+  top: calc(50% - 17px);
+  border-radius: 50%;
+  border: 1px solid #8fb3c4;
+  background: linear-gradient(135deg, #607d8e, #324d5e);
+  box-shadow: 0 3px 8px #0008;
+  pointer-events: none;
+}
+.virtual-joy-buttons {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+}
+.virtual-dpad,
+.virtual-face {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 5px;
+}
+.virtual-face button:nth-child(3),
+.virtual-face button:nth-child(4) {
+  color: #f19b9e;
+}
+.virtual-joy-system {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.virtual-joy-system button {
+  font-size: 10px;
+  padding: 4px 12px;
+  min-height: 25px;
+}
+.virtual-joy > p {
+  color: var(--muted);
+  font-size: 9px;
+  margin: 11px 0 0;
+  text-align: center;
+}
+@media (max-width: 760px) {
+  .mission-web-control {
+    font-size: 10px;
+    padding: 7px;
+  }
+  .web-state-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+  .mission-joints.web-control-panel {
+    padding: 20px;
   }
 }

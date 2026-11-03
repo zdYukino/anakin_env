@@ -29,11 +29,13 @@ bool RuntimeController::fresh(Clock::time_point now) const {
   return feedback_ && now >= feedback_->acquired &&
          now - feedback_->acquired <= mode_.guards.state_timeout;
 }
-bool RuntimeController::permitted_input(const InputSnapshot& input) const {
+bool RuntimeController::input_fresh(const InputSnapshot& input) const {
   const auto now = now_();
-  return !mode_.guards.require_primary_input ||
-         (input.primary_online && now >= input.primary_acquired &&
-          now - input.primary_acquired <= mode_.guards.input_timeout);
+  return input.primary_online && now >= input.primary_acquired &&
+         now - input.primary_acquired <= mode_.guards.input_timeout;
+}
+bool RuntimeController::permitted_input(const InputSnapshot& input) const {
+  return !mode_.guards.require_primary_input || input_fresh(input);
 }
 bool RuntimeController::measured_valid() const {
   if (!feedback_) return false;
@@ -68,6 +70,10 @@ void RuntimeController::feedback(const NativeSample& sample) {
   if (feedback_ && sample.frame.sdk_tick < feedback_->frame.sdk_tick)
     rollback_fault_ = mode_.guards.fault_on_tick_rollback;
   feedback_ = sample;
+}
+void RuntimeController::malformed_transport_packet() {
+  if (mode_.mode == RuntimeMode::Real || mode_.real_checks)
+    feedback_fault("Malformed native feedback or remote packet");
 }
 void RuntimeController::feedback_fault(const std::string& reason) {
   diagnostic_ = reason;
@@ -107,6 +113,8 @@ bool RuntimeController::target(const Target& target) {
   std::string reason;
   if (!gate_.accept(target, now_(), reason)) { diagnostic_ = "Target rejected: " + reason; return false; }
   target_ = target;
+  handover_target_.reset();
+  handover_deadline_ = {};
   confirmation_.target(target);
   return true;
 }
@@ -121,7 +129,7 @@ void RuntimeController::release_command() {
   if (!send(true)) throw std::runtime_error("Zero-gain release write failed");
   wrote_ = false;
 }
-void RuntimeController::revoke() {
+void RuntimeController::revoke(bool preserve_handover) {
   if (acquisition_) backend_.cancel_acquire(*acquisition_);
   acquisition_.reset();
   alignment_started_.reset();
@@ -130,6 +138,12 @@ void RuntimeController::revoke() {
   gate_.stop();
   router_.revoke();
   target_.reset();
+  last_written_target_.reset();
+  last_written_deadline_ = {};
+  if (!preserve_handover) {
+    handover_target_.reset();
+    handover_deadline_ = {};
+  }
   request_.reset();
   status_.reset();
   need_policy_ = false;
@@ -151,7 +165,7 @@ void RuntimeController::start_policy() {
   request.execution_profile = sdk_pd_execution_profile;
   request.command_semantics = pd_reference;
   request.transition_profile = plan_.before.effective_state == State::Hold &&
-      request.target_model == "asap_loco" ? "g1_startup_v1" : "g1_named_upper_v1";
+      request.target_model == "asap_loco" ? "g1_startup_v1" : "g1_direct_v1";
   request.allow_source_continuation = true;
   request.timeout.sec = static_cast<int32_t>(mode_.policy_timeout.count() / 1000);
   request.timeout.nanosec = static_cast<uint32_t>(mode_.policy_timeout.count() % 1000) * 1000000;
@@ -167,10 +181,19 @@ void RuntimeController::start_policy() {
 }
 void RuntimeController::execute(const ActionPlan& plan) {
   if (plan.decision == Decision::Accepted && plan.before.state != plan.after.state) entered_ = now_();
+  bool preserve_handover = false;
+  if (plan.decision == Decision::Accepted && plan.after.state == State::Preparing &&
+      plan.before.state != State::Preparing && plan.before.producing_model && request_ &&
+      last_written_target_ && last_written_target_->request_id == request_->request_id &&
+      last_written_target_->epoch == request_->next_epoch && now_() < last_written_deadline_) {
+    handover_target_ = *last_written_target_;
+    handover_deadline_ = last_written_deadline_;
+    preserve_handover = true;
+  }
   for (const auto& action : plan.actions) {
     try {
       switch (action.action) {
-        case Action::RevokeActuation: revoke(); break;
+        case Action::RevokeActuation: revoke(preserve_handover); break;
         case Action::ReleaseIfOwned:
           release_command();
           if (backend_.authority_owned()) backend_.release_authority();
@@ -200,6 +223,25 @@ void RuntimeController::execute(const ActionPlan& plan) {
   }
 }
 
+bool RuntimeController::manual_entry_allowed(const Event& event, const InputSnapshot& input) const {
+  return event.kind != EventKind::ManualRequest || !event.requested_state ||
+      *event.requested_state == State::Disarmed || *event.requested_state == State::Damping ||
+      ((!mode_.guards.strict_deadlines || (fresh(now_()) && actual_valid())) && permitted_input(input));
+}
+
+bool RuntimeController::action_available(InputAction action, const InputSnapshot& input) const {
+  if (stopped_) return false;
+  if (const auto event = input_event(action)) {
+    if (action == InputAction::EmergencyStop) return true;
+    if (pending_fault_ || stop_requested(input) || !manual_entry_allowed(*event, input)) return false;
+    auto probe = machine_;
+    const auto decision = probe.dispatch({*event});
+    return decision.cause == event->kind &&
+        (decision.decision == Decision::Accepted || decision.decision == Decision::Idempotent);
+  }
+  return !pending_fault_ && !stop_requested(input) && input.primary_online && machine_.snapshot().state != State::Fault;
+}
+
 ActionPlan RuntimeController::tick(const InputFrame& input) {
   const auto now = now_();
   auto events = input.events;
@@ -215,9 +257,7 @@ ActionPlan RuntimeController::tick(const InputFrame& input) {
   if (fault_needed) events.push_back(Event::system(EventKind::Fault));
   // Apply configurable real entry guards before the state engine can acquire.
   events.erase(std::remove_if(events.begin(), events.end(), [&](const Event& event) {
-    return event.kind == EventKind::ManualRequest && event.requested_state &&
-        *event.requested_state != State::Disarmed && *event.requested_state != State::Damping &&
-        ((mode_.guards.strict_deadlines && !valid) || !permitted_input(input.snapshot));
+    return !manual_entry_allowed(event, input.snapshot);
   }), events.end());
   if (before.state == State::Align && alignment_started_ && valid && feedback_was_fresh_)
     alignment_elapsed_ += std::chrono::duration<double>(now - last_tick_).count();
@@ -233,6 +273,24 @@ ActionPlan RuntimeController::tick(const InputFrame& input) {
       status_->active_model == "asap_cr7" && status_->target_active && confirmation_.active())
     events.push_back(Event::policy(EventKind::MotionDone, before.generation, identity(), PolicyModel::AsapCr7));
   auto decision = machine_.dispatch(events);
+  if (decision.decision == Decision::Accepted) {
+    if (decision.cause == EventKind::MotionDone &&
+        decision.after.requested_state == State::AsapLoco) {
+      return_motion_inhibited_ = true;
+      return_neutral_seen_ = false;
+    } else if (decision.cause == EventKind::ManualRequest ||
+               decision.cause == EventKind::EmergencyStop || decision.cause == EventKind::Fault) {
+      return_motion_inhibited_ = false;
+      return_neutral_seen_ = false;
+    }
+  }
+  if (return_motion_inhibited_ && input.snapshot.primary_online && input.snapshot.moving) {
+    const bool neutral = std::all_of(input.snapshot.velocity.begin(), input.snapshot.velocity.end(),
+                                     [](double velocity) { return std::abs(velocity) < 1e-6; });
+    if (neutral) return_neutral_seen_ = true;
+    else if (return_neutral_seen_ && machine_.snapshot().state == State::AsapLoco)
+      return_motion_inhibited_ = false;
+  }
   // Keep the original transition context while waiting for delayed MC discovery.
   if (decision.decision == Decision::Accepted) plan_ = decision;
   else {
@@ -255,7 +313,7 @@ ActionPlan RuntimeController::tick(const InputFrame& input) {
     }
   }
   if (alignment_pending_ && machine_.snapshot().state == State::Align &&
-      authority_ready_ && valid && permitted_input(input.snapshot) && !pending_fault_) {
+      authority_ready_ && valid && !pending_fault_) {
     std::copy_n(feedback_->frame.joints.position.begin(), 29, alignment_source_.begin());
     alignment_elapsed_ = 0.;
     alignment_started_ = now;
@@ -281,7 +339,7 @@ Frame RuntimeController::make_frame(const InputSnapshot& input) const {
   frame.command_semantics = pd_reference;
   frame.execution_mode = wire_mode(machine_.snapshot().state);
   // In Preparing this explicitly permits MC warmup, not a motor writer call.
-  frame.execution_authorized = plan_.inference_allowed && actual_valid() && permitted_input(input) && !pending_fault_;
+  frame.execution_authorized = plan_.inference_allowed && actual_valid() && !pending_fault_;
   if (!diagnostic_.empty()) {
     diagnostic_msgs::msg::DiagnosticStatus diagnostic;
     diagnostic.name = "anakin_env/runtime";
@@ -297,12 +355,13 @@ Frame RuntimeController::make_frame(const InputSnapshot& input) const {
     frame.diagnostics.status.push_back(diagnostic);
   }
   frame.command_base_height = input.height;
-  frame.command_stand = input.moving;
+  const bool motion_allowed = !return_motion_inhibited_ && input_fresh(input) && input.moving;
+  frame.command_stand = motion_allowed;
   frame.command.header = frame.header;
-  frame.command.twist.linear.x = input.velocity[0];
-  frame.command.twist.linear.y = input.velocity[1];
-  frame.command.twist.angular.z = input.velocity[2];
-  frame.validity |= Frame::VALID_COMMAND; // Explicit neutral command when primary is absent in sim.
+  frame.command.twist.linear.x = motion_allowed ? input.velocity[0] : 0.;
+  frame.command.twist.linear.y = motion_allowed ? input.velocity[1] : 0.;
+  frame.command.twist.angular.z = motion_allowed ? input.velocity[2] : 0.;
+  frame.validity |= Frame::VALID_COMMAND; // A lost or stale primary yields a neutral command.
   frame.mc_instance_seen = mc_instance_;
   if (request_) {
     frame.request_id_seen = request_->request_id;
@@ -329,9 +388,11 @@ std::optional<Frame> RuntimeController::take_frame(const InputSnapshot& input) {
 bool RuntimeController::send(bool release) {
   if (!feedback_ || (!release && (!plan_.outputs.lowcmd || pending_fault_ || stopped_))) return false;
   auto source = plan_.command;
+  bool handover = false;
   if (!release && source == CommandSource::Policy && (!request_ || !target_ || !gate_.live(now_()))) {
     if (machine_.snapshot().state != State::Preparing) return false;
-    source = preparing_fallback_;
+    handover = handover_target_ && now_() < handover_deadline_;
+    if (!handover) source = preparing_fallback_;
   }
   const bool damping = !release && source == CommandSource::Damping;
   const bool policy = !release && source == CommandSource::Policy;
@@ -350,14 +411,16 @@ bool RuntimeController::send(bool release) {
     snapshot.state_available = feedback_.has_value();
     snapshot.state_acquired = feedback_->acquired;
     snapshot.feedback_generation = feedback_->generation;
-    snapshot.require_primary_input = mode_.guards.require_primary_input;
+    // The primary was required for manual entry; a later disconnect must not release actuation.
+    snapshot.require_primary_input = false;
     snapshot.state_timeout = mode_.guards.state_timeout;
     snapshot.input_timeout = mode_.guards.input_timeout;
     snapshot.remote_valid = input.primary_online;
     snapshot.remote_acquired = input.primary_acquired;
     snapshot.stop_requested = stop_requested(input);
-    snapshot.target_authorized = gate_.live(now_());
-    snapshot.target_deadline = gate_.deadline();
+    snapshot.target_authorized = handover ? handover_target_ &&
+        machine_.snapshot().state == State::Preparing && now_() < handover_deadline_ : gate_.live(now_());
+    snapshot.target_deadline = handover ? handover_deadline_ : gate_.deadline();
     return snapshot;
   };
   const auto encode = [&](const SendSnapshot&) {
@@ -368,8 +431,9 @@ bool RuntimeController::send(bool release) {
       Positions q = stand_pose();
       std::string model = "asap_loco";
       if (policy) {
-        std::copy_n(target_->target.points[0].positions.begin(), 29, q.begin());
-        model = target_->model_id;
+        const auto& chosen = handover ? *handover_target_ : *target_;
+        std::copy_n(chosen.target.points[0].positions.begin(), 29, q.begin());
+        model = chosen.model_id;
       } else if (source == CommandSource::StandInterpolation) {
         const auto alpha = std::clamp(alignment_elapsed_ / mode_.alignment_seconds, 0., 1.);
         for (size_t i = 0; i < q.size(); ++i) q[i] = (1. - alpha) * alignment_source_[i] + alpha * q[i];
@@ -390,7 +454,14 @@ bool RuntimeController::send(bool release) {
   }
   ++writer_count_;
   if (!release) wrote_ = true;
-  if (policy) { published_seq_ = target_->seq; published_mask_ |= target_->phase; published_deadline_ = gate_.deadline(); }
+  if (policy && !handover) {
+    published_seq_ = target_->seq;
+    published_mask_ |= target_->phase;
+    published_deadline_ = gate_.deadline();
+    if (!last_written_target_ || last_written_target_->seq != target_->seq)
+      last_written_target_ = *target_;
+    last_written_deadline_ = gate_.deadline();
+  }
   return true;
 }
 void RuntimeController::shutdown() {

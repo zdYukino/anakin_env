@@ -94,6 +94,8 @@ class AsyncAuthority {
 };
 
 std::unique_ptr<MotionSwitcherApi> make_sdk_motion_switcher();
+// Loopback-only substitute: the real authority workflow runs without hardware RPCs.
+std::unique_ptr<MotionSwitcherApi> make_simulated_motion_switcher();
 
 class RealBackend final : public RuntimeBackend {
  public:

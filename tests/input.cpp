@@ -1,5 +1,7 @@
-// Production adapters, PTY and SDL virtual devices only. No ROS/SDK contexts.
+// Production adapters and SDL virtual devices only. No ROS/SDK contexts.
 #include <anakin_env/input.hpp>
+#include <anakin_env/web_input.hpp>
+#include <yaml-cpp/yaml.h>
 #include <SDL.h>
 
 #include <algorithm>
@@ -7,11 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
-#include <poll.h>
-#include <pty.h>
-#include <termios.h>
 #include <thread>
-#include <unistd.h>
 
 using namespace anakin::env;
 using namespace std::chrono_literals;
@@ -32,12 +30,12 @@ bool event(const InputFrame& frame, EventKind expected) {
   return false;
 }
 InputTime start() { return InputTime{} + 10s; }
-InputSample keyboard(InputTime time, std::vector<Key> keys = {}) {
+InputSample web(InputTime time, std::optional<InputAction> command = std::nullopt) {
   InputSample sample;
-  sample.source = InputSource::Keyboard;
+  sample.source = InputSource::Web;
   sample.connected = true;
   sample.acquired = time;
-  sample.keys = std::move(keys);
+  sample.action = command;
   return sample;
 }
 InputSample remote(uint16_t keys, InputTime time, const std::array<float, 4>& axes = {}) {
@@ -47,65 +45,50 @@ void mapper(const fs::path& configs) {
   auto config = load_input_config(configs / "inputs.yaml");
   auto now = start();
   InputHub hub(config, 250ms);
-  check(!hub.poll(now).snapshot.primary_online && hub.poll(now).events.empty(),
-        "Absent primary waits without fabricating startup source loss");
-  hub.submit(keyboard(now));
+  check(!hub.poll(now).snapshot.primary_online, "Absent inputs do not invent an owner");
   hub.submit(remote(0, now));
-  hub.poll(now);
-  hub.submit(remote(0x0403, now += 1ms));
-  check(hub.poll(now).events.empty(), "Non-primary ordinary control is ignored");
-  hub.submit(keyboard(now, {Key::Digit3, Key::G}));
-  hub.submit(remote(0x0103, now));
-  check(stop_requested(hub.snapshot(now)), "Sender sees enabled non-primary stop before scheduler");
-  const auto stopped = hub.poll(now);
-  check(stopped.actions.size() == 1 && action(stopped, InputAction::EmergencyStop) &&
-        event(stopped, EventKind::EmergencyStop) && !stopped.snapshot.moving,
-        "All-source stop dominates primary mode and motion actions in the same cycle");
+  hub.submit(web(now));
+  check(!hub.poll(now).snapshot.active_source, "Neutral device heartbeats never seize control");
+  hub.submit(web(now += 1ms, InputAction::Align));
+  check(action(hub.poll(now), InputAction::Align), "Deliberate web action acquires an idle hub");
   hub.submit(remote(0, now += 1ms));
-  check(!stop_requested(hub.snapshot(now)), "Released controller stop clears normalized held predicate");
+  check(hub.poll(now).snapshot.active_source == InputSource::Web, "Neutral Unitree heartbeat does not steal web control");
+  hub.submit(web(now += 1ms, InputAction::Hold));
+  hub.submit(remote(0x0403, now));
+  const auto conflict = hub.poll(now);
+  check(conflict.snapshot.active_source == InputSource::Remote && conflict.actions.size() == 1 && action(conflict, InputAction::Align),
+        "Same-cycle Unitree action wins over web and losing action is discarded");
+  hub.submit(web(now += 1ms, InputAction::MotionToggle));
+  check(hub.poll(now).snapshot.active_source == InputSource::Web, "A new deliberate web command can take over an idle remote");
+  hub.submit(remote(0x0100, now += 1ms));
+  check(stop_requested(hub.snapshot(now)), "Non-owner stop reaches the final write admission check");
+  const auto stopped = hub.poll(now);
+  check(stopped.actions.size() == 1 && action(stopped, InputAction::EmergencyStop) && !stopped.snapshot.moving,
+        "Every-source emergency suppresses motion and ordinary requests");
+  hub.submit(remote(0, now += 1ms));
+  hub.poll(now);
   hub.submit(remote(0x0200, now += 1ms));
   hub.submit(remote(0, now += 1ms));
-  check(stop_requested(hub.snapshot(now)) && event(hub.poll(now), EventKind::EmergencyStop),
-        "Brief stop between scheduler cycles is latched and delivered");
-
-  config.enabled_sources = {InputSource::Keyboard};
+  check(event(hub.poll(now), EventKind::EmergencyStop), "Brief stop is latched between scheduler cycles");
+  config.enabled_sources = {InputSource::Web};
   InputHub disabled(config, 250ms);
-  disabled.submit(keyboard(now));
   disabled.submit(remote(0x0100, now));
   check(!stop_requested(disabled.snapshot(now)), "Disabled sources cannot inject stops");
-
   config = load_input_config(configs / "inputs.yaml");
-  // Remap the production predicate itself: no hidden A/B test is involved.
-  auto& bindings = config.controller_bindings;
-  bindings.erase(std::remove_if(bindings.begin(), bindings.end(), [](const InputBinding& binding) {
-    const auto button = std::get<ButtonBinding>(binding.control).button;
-    return button == Button::A || button == Button::B || button == Button::X;
-  }), bindings.end());
-  bindings.push_back({ButtonBinding{Button::X, 0, true}, Trigger::Held, InputAction::EmergencyStop});
-  InputHub remapped(config, 250ms);
-  remapped.submit(remote(0x0100, now));
-  check(!stop_requested(remapped.snapshot(now)), "A is not secretly hardcoded as a stop");
-  remapped.submit(remote(0x0400, now += 1ms));
-  check(stop_requested(remapped.snapshot(now)) && event(remapped.poll(now), EventKind::EmergencyStop),
-        "One mapping drives both sender predicate and scheduler stop");
-
+  InputHub three(config, 250ms);
+  auto pad = web(now); pad.source = InputSource::Gamepad;
+  three.submit(pad); three.submit(web(now)); three.submit(remote(0, now)); three.poll(now);
+  pad.acquired = now += 1ms; pad.buttons.set(static_cast<size_t>(Button::X)); pad.shoulders = 3;
+  three.submit(pad); three.submit(web(now, InputAction::Hold));
+  check(three.poll(now).snapshot.active_source == InputSource::Gamepad, "Physical Joy wins a same-cycle web conflict");
+  three.submit(remote(0x0403, now += 1ms));
+  pad.acquired = now; pad.buttons.reset(); pad.shoulders = 0; three.submit(pad);
+  check(three.poll(now).snapshot.active_source == InputSource::Remote, "Deliberate Unitree action takes over Joy");
+  three.submit(web(now += 251ms));
+  const auto lost_owner = three.poll(now);
+  check(event(lost_owner, EventKind::SourceLost) && lost_owner.lost_source == InputSource::Remote,
+        "Another online device cannot mask current-owner freshness loss");
   config = load_input_config(configs / "inputs.yaml");
-  for (const auto source : {InputSource::Keyboard, InputSource::Remote}) {
-    InputHub stale_stop(config, 250ms);
-    const auto stopped_sample = source == InputSource::Keyboard
-        ? keyboard(now, {Key::Space}) : remote(0x0100, now);
-    stale_stop.submit(stopped_sample);
-    check(!stop_requested(stale_stop.snapshot(now - 1ms)) &&
-          !event(stale_stop.poll(now - 1ms), EventKind::EmergencyStop),
-          "Future-acquired stop is not usable before its acquisition time");
-    stale_stop.submit(stopped_sample);
-    check(event(stale_stop.poll(now), EventKind::EmergencyStop), "Fresh stop remains effective");
-    stale_stop.submit(stopped_sample);
-    check(!stop_requested(stale_stop.snapshot(now + 251ms)) &&
-          !event(stale_stop.poll(now + 251ms), EventKind::EmergencyStop),
-          "Rereading a cached stop cannot bypass acquisition freshness");
-  }
-
   config.primary = InputSource::Remote;
   for (const bool explicit_disconnect : {false, true}) {
     InputHub replacement(config, 250ms);
@@ -154,8 +137,8 @@ void mapper(const fs::path& configs) {
     check(event(frame, EventKind::SourceLost) && frame.snapshot.velocity == std::array<double, 3>{},
           "Primary freshness loss emits a SourceLost edge and zeros velocity");
     const auto result = machine.dispatch(frame.events);
-    check(result.after.state == (mode == RuntimeMode::Sim ? State::Hold : State::Fault),
-          "A's selected mode config owns retain-mode versus fault behavior");
+    check(result.after.state == State::Hold,
+          "Input loss retains the current state in both simulation and real mode");
     check(!event(lost.poll(now + 1ms), EventKind::SourceLost), "Lost event is an edge, not an idle heartbeat");
     lost.submit(remote(0x1003, now += 2ms));
     check(lost.poll(now).events.empty(), "Reconnect with held ordinary combo creates no fake press");
@@ -183,113 +166,44 @@ void mapper(const fs::path& configs) {
   // Exercise the same mutex-backed API used by callbacks and the sender thread.
   InputHub concurrent(config, 250ms);
   std::thread producer([&] {
-    for (int i = 0; i < 1000; ++i) concurrent.submit(remote(i % 2 ? 0x0100 : 0, now));
+    for (int i = 0; i < 1000; ++i) concurrent.submit(remote(i % 2 ? 0x0100 : 0, now + std::chrono::nanoseconds(i)));
   });
   for (int i = 0; i < 1000; ++i) (void)concurrent.snapshot(now);
   producer.join();
-  check(stop_requested(concurrent.snapshot(now)), "Concurrent samples preserve pending/held stop");
+  check(stop_requested(concurrent.snapshot(now + 1000ns)), "Concurrent samples preserve pending/held stop");
 }
 
-struct Pty {
-  int master = -1, slave = -1;
-  Pty() { check(openpty(&master, &slave, nullptr, nullptr, nullptr) == 0, "Cannot open PTY fixture"); }
-  ~Pty() { if (master >= 0) close(master); if (slave >= 0) close(slave); }
-  void send(const std::string& text) {
-    check(write(master, text.data(), text.size()) == static_cast<ssize_t>(text.size()), "Cannot inject PTY bytes");
-    pollfd ready{slave, POLLIN, 0};
-    check(::poll(&ready, 1, 1000) == 1 && (ready.revents & POLLIN),
-          "Injected PTY bytes did not reach the terminal input queue");
-  }
-};
-bool same_settings(const termios& left, const termios& right) {
-  return left.c_iflag == right.c_iflag && left.c_oflag == right.c_oflag &&
-         left.c_cflag == right.c_cflag && left.c_lflag == right.c_lflag &&
-         std::memcmp(left.c_cc, right.c_cc, sizeof(left.c_cc)) == 0;
-}
-void terminal(const fs::path& configs) {
+void web_contracts(const fs::path& configs) {
   const auto config = load_input_config(configs / "inputs.yaml");
   auto now = start();
-  Pty pty;
-  termios original{}, current{};
-  check(tcgetattr(pty.slave, &original) == 0, "Cannot read PTY settings");
-  pty.send("5\n");
-  pollfd queued{pty.slave, POLLIN, 0};
-  check(::poll(&queued, 1, 1000) == 1 && (queued.revents & POLLIN),
-        "Pre-start bytes have reached the PTY input queue before startup flush");
-  {
-    TerminalKeyboard keyboard_device(pty.slave);
-    InputHub hub(config, 250ms);
-    check(tcgetattr(pty.slave, &current) == 0 && !(current.c_lflag & (ICANON | ECHO)),
-          "Terminal enters noncanonical no-echo mode");
-    auto initial = keyboard_device.poll(now);
-    check(initial.connected && initial.keys.empty(), "Queued startup terminal bytes are discarded");
-    hub.submit(initial);
-    hub.poll(now);
-    const auto idle = [&](std::chrono::milliseconds duration) {
-      InputFrame frame;
-      while (duration.count() > 0) {
-        const auto step = std::min(duration, 100ms);
-        duration -= step;
-        hub.submit(keyboard_device.poll(now += step));
-        frame = hub.poll(now);
-      }
-      return frame;
-    };
-    const std::vector<std::pair<std::string, InputAction>> keys{
-      {"1", InputAction::Disarmed}, {"2", InputAction::EmergencyStop}, {" ", InputAction::EmergencyStop},
-      {"3", InputAction::Align}, {"4", InputAction::Hold}, {"5", InputAction::AsapLoco},
-      {"6", InputAction::AsapCr7}, {"c", InputAction::ClearFault}, {"C", InputAction::ClearFault}};
-    for (const auto& item : keys) {
-      idle(300ms);
-      pty.send(item.first);
-      hub.submit(keyboard_device.poll(now));
-      check(action(hub.poll(now), item.second), "PTY confirmed mode/fault/stop key: " + item.first);
-    }
-    idle(300ms);
-    pty.send("gWaq");
-    hub.submit(keyboard_device.poll(now));
-    const auto moving = hub.poll(now);
-    check(moving.snapshot.moving && moving.snapshot.velocity == std::array<double, 3>{.5, .5, 1.},
-          "PTY motion keys use configured forward/lateral/yaw scales");
-    const auto expired = idle(251ms);
-    check(expired.snapshot.primary_online && expired.snapshot.velocity == std::array<double, 3>{},
-          "Keyboard commands expire without declaring a neutral connected terminal offline");
-    pty.send("sde");
-    hub.submit(keyboard_device.poll(now += 1ms));
-    check(hub.poll(now).snapshot.velocity == std::array<double, 3>{-.5, -.5, -1.},
-          "Opposite terminal velocity keys preserve signs");
-    const auto height = hub.snapshot(now).height;
-    pty.send("\x1b");
-    hub.submit(keyboard_device.poll(now += 1ms));
-    check(hub.poll(now).actions.empty(), "Fragmented escape prefix is not a key action");
-    pty.send("[");
-    hub.submit(keyboard_device.poll(now += 1ms));
-    check(hub.poll(now).actions.empty(), "Fragmented CSI sequence waits for direction");
-    pty.send("A");
-    hub.submit(keyboard_device.poll(now += 1ms));
-    check(hub.poll(now).snapshot.height == height + config.height_step, "SSH CSI Up adjusts height");
-    pty.send("\x1bOB");
-    hub.submit(keyboard_device.poll(now += 1ms));
-    check(std::abs(hub.poll(now).snapshot.height - height) < 1e-12, "Application cursor Down adjusts height");
-    keyboard_device.restore();
-    check(!keyboard_device.poll(now).connected, "Explicit restore closes keyboard input lifecycle");
-  }
-  check(tcgetattr(pty.slave, &current) == 0 && same_settings(original, current), "Terminal settings restored on normal shutdown");
-  try {
-    TerminalKeyboard throwing(pty.slave);
-    throw std::runtime_error("fixture exception");
-  } catch (const std::runtime_error&) {}
-  check(tcgetattr(pty.slave, &current) == 0 && same_settings(original, current), "Terminal settings restored on exception unwinding");
-  {
-    TerminalKeyboard disconnected(pty.slave);
-    close(pty.master);
-    pty.master = -1;
-    check(!disconnected.poll(now).connected, "PTY hangup is reported as disconnected");
-  }
-  int pipes[2];
-  check(pipe(pipes) == 0, "Cannot create non-TTY fixture");
-  rejected([&] { TerminalKeyboard invalid(pipes[0]); }, "Non-TTY keyboard accepted");
-  close(pipes[0]); close(pipes[1]);
+  WebInput adapter(config, 250ms, "env-test");
+  YAML::Node packet = YAML::Load("{v: 1, environment: env-test, session: abc123, sequence: 1, sent_ms: 1000, operation: activate, axes: [0,0,0,0], buttons: [false,false,false,false,false,false,false,false,false,false], shoulders: 0}");
+  auto send = [&] { return adapter.receive(YAML::Dump(packet), now, 1000); };
+  const auto initial = send();
+  check(initial.connected && initial.activate && adapter.owner() == "abc123", "Explicit neutral activation obtains a lease");
+  rejected(send, "Repeated activation accepted");
+  packet["session"] = "def456"; packet["operation"] = "input"; packet["sequence"] = 2;
+  rejected(send, "Another web session stole a lease");
+  packet["session"] = "abc123"; packet["action"] = "align";
+  const auto command = send();
+  check(command.action == InputAction::Align && command.connection == initial.connection, "Configured action keeps the current lease");
+  rejected(send, "Replayed web sequence accepted");
+  packet["sequence"] = 3; packet["axes"][0] = ".nan";
+  rejected(send, "Nonfinite web axis accepted");
+  packet["axes"][0] = 0; packet["sent_ms"] = 500;
+  rejected(send, "Queued expired web command accepted");
+  packet["sent_ms"] = 1000; packet["environment"] = "old-env";
+  rejected(send, "Old ENV session accepted");
+  packet["environment"] = "env-test"; packet["action"] = "publish";
+  rejected(send, "Unconfigured web action accepted");
+  now += 251ms;
+  check(adapter.expire(now).has_value() && adapter.owner().empty(), "Missing heartbeat expires and disconnects the lease");
+  packet.remove("action");
+  rejected(send, "Input automatically reactivated an expired lease");
+  packet["operation"] = "activate"; packet["sequence"] = 1;
+  check(send().connection != initial.connection, "Explicit reactivation receives a new connection identity");
+  packet["operation"] = "release"; packet["sequence"] = 2;
+  check(!send().connected && adapter.owner().empty(), "Release immediately revokes the lease");
 }
 
 void remote_contracts(const fs::path& configs) {
@@ -426,19 +340,71 @@ void sdl(const fs::path& configs) {
     check(sample.connected && sample.connection != connection && hub.poll(now).actions.empty(),
           "SDL hotplug replacement gets a new identity and no startup-held mode edge");
   }
+  {
+    // Reproduce the Series X Bluetooth layout, which differs from old SDL's
+    // generic Xbox fallback. Use the production YAML with a virtual device GUID.
+    VirtualPad xbox;
+    const auto config = load_input_config(configs / "inputs.yaml");
+    auto mapping = config.gamepad_mappings.at(0);
+    char guid[33];
+    SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(xbox.device), guid, sizeof(guid));
+    mapping.replace(0, 32, guid);
+    SdlGamepad adapter(xbox.device, {mapping});
+    const auto axis = [&](int index, Sint16 value) {
+      check(SDL_JoystickSetVirtualAxis(xbox.joystick, index, value) == 0, "Cannot inject Xbox axis");
+    };
+    auto now = start();
+    axis(2, 8192); axis(3, -16384); axis(4, -32768); axis(5, -32768);
+    auto sample = adapter.poll(now);
+    check(std::abs(sample.axes[2] - .25f) < .001f && sample.axes[3] == -.5f &&
+          sample.triggers && (*sample.triggers)[0] == 0.f && (*sample.triggers)[1] == 0.f,
+          "Xbox right stick is independent of released LT/RT");
+    axis(4, 32767);
+    sample = adapter.poll(now += 1ms);
+    check(sample.axes[3] == -.5f && (*sample.triggers)[1] == 1.f && (*sample.triggers)[0] == 0.f,
+          "Full RT cannot move the right stick or LT");
+    axis(5, 32767);
+    SDL_JoystickSetVirtualButton(xbox.joystick, 6, 1);
+    SDL_JoystickSetVirtualButton(xbox.joystick, 7, 1);
+    SDL_JoystickSetVirtualButton(xbox.joystick, 3, 1);
+    sample = adapter.poll(now += 1ms);
+    check((*sample.triggers)[0] == 1.f && (*sample.triggers)[1] == 1.f &&
+          sample.shoulders == (shoulder_l1 | shoulder_r1) && sample.buttons.test(static_cast<size_t>(Button::X)),
+          "Xbox LB/RB and face buttons use their actual Bluetooth indices");
+    check(sample.device && sample.device->mapping.find("righty:a3") != std::string::npos,
+          "Effective device mapping is available for diagnostics");
+  }
   SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS);
+}
+
+void inspect(const fs::path& configs) {
+  const auto config = load_input_config(configs / "inputs.yaml");
+  SdlGamepad adapter(config.gamepad_device_index, config.gamepad_mappings);
+  InputSample sample;
+  for (int i = 0; i < 30; ++i) {
+    sample = adapter.poll();
+    std::this_thread::sleep_for(10ms);
+  }
+  check(sample.connected && sample.device, "No connected gamepad");
+  std::cout << "Read-only, no ROS/SDK/control context\n" << sample.device->name << '\n'
+            << sample.device->guid << '\n' << sample.device->mapping << '\n';
+  std::cout << "Sticks:";
+  for (const auto axis : sample.axes) std::cout << ' ' << axis;
+  if (sample.triggers) std::cout << " LT=" << (*sample.triggers)[0] << " RT=" << (*sample.triggers)[1];
+  std::cout << " LB=" << bool(sample.shoulders & shoulder_l1) << " RB=" << bool(sample.shoulders & shoulder_r1) << '\n';
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    check(argc == 3, "Usage: anakin_env_input_test mapper|terminal|sdl|remote CONFIG_DIR");
+    check(argc == 3, "Usage: anakin_env_input_test mapper|web|sdl|remote CONFIG_DIR");
     const auto configs = fs::canonical(argv[2]);
     const std::string suite = argv[1];
     if (suite == "mapper") mapper(configs);
-    else if (suite == "terminal") terminal(configs);
+    else if (suite == "web") web_contracts(configs);
     else if (suite == "sdl") sdl(configs);
     else if (suite == "remote") remote_contracts(configs);
+    else if (suite == "inspect") inspect(configs);
     else throw std::runtime_error("Unknown input suite");
     std::cout << suite << " input contracts passed\n";
     return 0;

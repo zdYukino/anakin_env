@@ -8,7 +8,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace anakin::env {
@@ -21,6 +20,7 @@ enum class Action { RevokeActuation, ReleaseIfOwned, AcquireAuthority, BeginAlig
                     ZeroMotion };
 enum class EventKind { EmergencyStop, Fault, ManualRequest, ClearFault, SourceLost,
                        AlignmentComplete, PolicyReady, MotionDone, DampingComplete, Immediate };
+// Fault is accepted from legacy configuration files but no longer changes behavior.
 enum class SourceLossPolicy { ZeroMotionKeepMode, Fault };
 
 std::string to_string(RuntimeMode value);
@@ -69,11 +69,13 @@ struct GuardConfig {
   double max_tilt_radians = 1., min_base_height = .3;
   std::chrono::milliseconds state_timeout{40};
   std::chrono::milliseconds input_timeout{250};
-  SourceLossPolicy source_loss = SourceLossPolicy::Fault;
+  SourceLossPolicy source_loss = SourceLossPolicy::ZeroMotionKeepMode;
 };
 
 struct ModeConfig {
   RuntimeMode mode = RuntimeMode::Real;
+  // Simulation transport can deliberately exercise the real policy/guards.
+  bool real_checks = false;
   State initial_state = State::Disarmed;
   TransportConfig transport;
   GuardConfig guards;
@@ -85,32 +87,28 @@ struct ModeConfig {
   std::vector<Transition> manual_transitions, automatic_transitions, system_transitions;
 };
 
-enum class InputSource { Keyboard, Gamepad, Remote };
+enum class InputSource { Web, Gamepad, Remote };
 enum class Trigger { Pressed, Held, Released };
 enum class Button { A, B, X, Y, Up, Down, Left, Right, Start, Select };
 enum class Axis { LeftX, LeftY, RightX, RightY };
-enum class Key { Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Space, C, W, A, S, D, Q, E,
-                 G, Up, Down, Left, Right };
 enum class InputAction { Disarmed, Damping, Align, Hold, AsapLoco, AsapCr7, ClearFault,
-                         EmergencyStop, Forward, Backward, Left, Right, TurnLeft, TurnRight,
-                         MotionToggle, HeightUp, HeightDown };
+                         EmergencyStop, MotionToggle, HeightUp, HeightDown };
 enum class RemoteChannel { Lowstate, WirelessTopic };
 
 std::string to_string(InputSource value);
+std::string to_string(InputAction value);
+InputAction input_action(const std::string& value);
 
 // Adapters normalize LB/RB to L1/R1; normal bindings always match the exact mask.
 constexpr uint8_t shoulder_l1 = 1;
 constexpr uint8_t shoulder_r1 = 2;
-struct KeyboardBinding {
-  Key key;
-};
 struct ButtonBinding {
   Button button;
   uint8_t shoulders = 0;
   bool any_shoulders = false;  // Permitted only for emergency stops.
 };
 struct InputBinding {
-  std::variant<KeyboardBinding, ButtonBinding> control;
+  ButtonBinding control;
   Trigger trigger = Trigger::Pressed;
   InputAction action;
 };
@@ -119,15 +117,16 @@ struct AxisBinding {
   double scale;
 };
 struct InputConfig {
-  InputSource primary = InputSource::Keyboard;
+  std::optional<InputSource> primary;  // Empty: automatic, remote > gamepad > web on contention.
   std::vector<InputSource> enabled_sources;
-  std::chrono::milliseconds keyboard_command_timeout{250};
   int gamepad_device_index = 0;
+  std::vector<std::string> gamepad_mappings;  // SDL mappings, each scoped to one exact device GUID.
   RemoteChannel remote_channel = RemoteChannel::Lowstate;
   double deadzone = .04;
   std::array<AxisBinding, 3> velocity_axes;  // forward, lateral, yaw
   double initial_height = .78, height_step = .05;
-  std::vector<InputBinding> keyboard_bindings, controller_bindings;
+  std::vector<InputBinding> controller_bindings;
+  std::vector<InputAction> web_actions;
 };
 
 class ConfigError : public std::runtime_error {
@@ -137,16 +136,20 @@ class ConfigError : public std::runtime_error {
 
 ModeConfig load_mode_config(const std::filesystem::path& path, RuntimeMode expected_mode);
 InputConfig load_input_config(const std::filesystem::path& path);
+// Snapshot of the effective, already validated config, including CLI overrides.
+std::string input_config_yaml(const InputConfig& config);
 
 struct ResourceOptions {
   // Empty means /proc/self/exe. Test/launcher callers may pass the selected installed ELF.
   std::filesystem::path executable;
   std::optional<std::filesystem::path> install_prefix;
-  std::optional<std::filesystem::path> config, input_config;
+  std::optional<std::filesystem::path> config, input_config, real_config;
   std::optional<InputSource> primary_input;
+  bool automatic_input = false, real_checks = false;
 };
 struct ConfigPaths {
   std::filesystem::path install_prefix, mode, inputs;
+  std::optional<std::filesystem::path> real_checks;
 };
 struct Configuration {
   ConfigPaths paths;

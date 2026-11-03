@@ -5,5 +5,7 @@
 <buildtool_depend>ament_cmake</buildtool_depend><depend>rclcpp</depend><depend version_eq="0.1.0">anakin_sdk</depend>
 <depend>yaml-cpp</depend>
 <depend>sdl2</depend>
+<depend>diagnostic_msgs</depend><depend>rcl_interfaces</depend>
+  <depend>std_msgs</depend>
 <test_depend>python3</test_depend>
 <export><build_type>ament_cmake</build_type></export></package>

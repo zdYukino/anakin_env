@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RingBuffer } from '../src/core/buffer';
 import { convertRecords, csvRows, previewRecords, readRecords } from '../src/core/importer';
-import { findJoints } from '../src/core/robot';
+import { findJoints, robotPose } from '../src/core/robot';
 import { TelemetryStore } from '../src/core/telemetry';
 
 describe('bounded signal retention', () => {
@@ -95,6 +95,24 @@ it('preserves invalid feedback as unavailable, and honors source validity flags'
   const joints = findJoints({ joints: { name: ['a', 'b'], position: [null, 0.2] } });
   expect(Number.isNaN(joints?.position[0])).toBe(true);
   expect(joints?.position[1]).toBe(0.2);
+});
+
+it('holds the last valid live pose across missing sensor groups and accepts recovery', () => {
+  const valid = {
+    validity: 19,
+    joints: { name: ['a'], position: [0.4] },
+    imu: { orientation: { x: 0, y: 0, z: 0, w: 1 } },
+    odometry: { pose: { pose: { position: { z: 0.5 } } } },
+  };
+  const first = robotPose(valid);
+  const dropped = robotPose({ ...valid, validity: 0 }, first);
+  expect(dropped.height).toBe(0.5);
+  expect(dropped.orientation).toEqual([0, 0, 0, 1]);
+  expect(dropped.angles.get('a')).toBe(0.4);
+  expect(
+    robotPose({ ...valid, odometry: { pose: { pose: { position: { z: 0.7 } } } } }, dropped).height,
+  ).toBe(0.7);
+  expect(robotPose({ validity: 0 }).height).toBeUndefined();
 });
 
 it('does not recreate channels the operator removed when graph discovery refreshes', () => {

@@ -6,6 +6,7 @@ import { findJoints, validGroup } from '../core/robot';
 import { jsonObject, telemetry } from '../core/telemetry';
 import { numberAt } from '../core/types';
 import { RobotViewer } from './RobotViewer';
+import { WebControlPanel } from './WebControl';
 
 type JointFilter = 'ALL' | 'LOWER' | 'UPPER';
 const modeNames = ['DISARMED', 'ALIGNING', 'HOLD', 'ACTIVE', 'DAMPING', 'FAULT', 'PREPARING'];
@@ -22,9 +23,13 @@ function jointLabel(name: string) {
 export function MissionOverview({
   onJoint,
   precision,
+  onJoy,
+  joyOpen = false,
 }: {
   onJoint: (name: string) => void;
   precision: number;
+  onJoy?: () => void;
+  joyOpen?: boolean;
 }) {
   const { t } = useI18n();
   const [filter, setFilter] = useState<JointFilter>('ALL');
@@ -240,67 +245,73 @@ export function MissionOverview({
         </div>
         <div className="mission-status-footer">
           <Radio size={12} />
-          <span>{t('READ-ONLY TELEMETRY')}</span>
+          <span>{t(telemetry.webActive ? 'WEB CONTROL' : 'READ-ONLY TELEMETRY')}</span>
           <b>
             {telemetry.received ? telemetry.hz.toFixed(0) : '—'} <small>Hz</small>
           </b>
         </div>
       </aside>
-      <aside className="mission-joints" aria-label={t('Real-time joint angles')}>
-        <div className="mission-section-heading">
-          <div>
-            <span>02 / {t('KINEMATICS')}</span>
-            <h2>{t('JOINT ANGLES')}</h2>
+      {telemetry.webRequested && onJoy ? (
+        <WebControlPanel onJoy={onJoy} joyOpen={joyOpen} />
+      ) : (
+        <aside className="mission-joints" aria-label={t('Real-time joint angles')}>
+          <div className="mission-section-heading">
+            <div>
+              <span>02 / {t('KINEMATICS')}</span>
+              <h2>{t('JOINT ANGLES')}</h2>
+            </div>
+            <span className="joint-heading-unit">DEG</span>
           </div>
-          <span className="joint-heading-unit">DEG</span>
-        </div>
-        <div className="joint-filter" aria-label={t('Joint group')}>
-          {(['ALL', 'LOWER', 'UPPER'] as const).map((group) => (
-            <button
-              key={group}
-              className={filter === group ? 'selected' : ''}
-              aria-pressed={filter === group}
-              onClick={() => setFilter(group)}
-            >
-              {t(group)}
-            </button>
-          ))}
-        </div>
-        <div className="joint-list-header">
-          <span>{t('JOINT')}</span>
-          <span>{t('POSITION')} / °</span>
-        </div>
-        <div className="mission-joint-list">
-          {visibleNames.map((name, index) => {
-            const radians = positionByName.get(name);
-            const degrees =
-              radians !== undefined && Number.isFinite(radians)
-                ? (radians * 180) / Math.PI
-                : undefined;
-            return (
+          <div className="joint-filter" aria-label={t('Joint group')}>
+            {(['ALL', 'LOWER', 'UPPER'] as const).map((group) => (
               <button
-                className="mission-joint-row"
-                key={name}
-                onClick={() => onJoint(name)}
-                disabled={degrees === undefined}
-                title={degrees === undefined ? t('AWAITING JOINT DATA') : t('Select joint to plot')}
+                key={group}
+                className={filter === group ? 'selected' : ''}
+                aria-pressed={filter === group}
+                onClick={() => setFilter(group)}
               >
-                <span className="joint-index">{String(index + 1).padStart(2, '0')}</span>
-                <span className="joint-name">{t(jointLabel(name))}</span>
-                <strong>
-                  {value(degrees, 1)}
-                  <small>{degrees === undefined ? '' : '°'}</small>
-                </strong>
+                {t(group)}
               </button>
-            );
-          })}
-          {!visibleNames.length && <div className="joint-empty">{t('AWAITING JOINT DATA')}</div>}
-        </div>
-        <div className="joint-list-footer">
-          <span>{t('NAMED MAPPING')}</span>
-          <b>{joints ? `${received} / 29` : '— / 29'}</b>
-        </div>
-      </aside>
+            ))}
+          </div>
+          <div className="joint-list-header">
+            <span>{t('JOINT')}</span>
+            <span>{t('POSITION')} / °</span>
+          </div>
+          <div className="mission-joint-list">
+            {visibleNames.map((name, index) => {
+              const radians = positionByName.get(name);
+              const degrees =
+                radians !== undefined && Number.isFinite(radians)
+                  ? (radians * 180) / Math.PI
+                  : undefined;
+              return (
+                <button
+                  className="mission-joint-row"
+                  key={name}
+                  onClick={() => onJoint(name)}
+                  disabled={degrees === undefined}
+                  title={
+                    degrees === undefined ? t('AWAITING JOINT DATA') : t('Select joint to plot')
+                  }
+                >
+                  <span className="joint-index">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="joint-name">{t(jointLabel(name))}</span>
+                  <strong>
+                    {value(degrees, 1)}
+                    <small>{degrees === undefined ? '' : '°'}</small>
+                  </strong>
+                </button>
+              );
+            })}
+            {!visibleNames.length && <div className="joint-empty">{t('AWAITING JOINT DATA')}</div>}
+          </div>
+          <div className="joint-list-footer">
+            <span>{t('NAMED MAPPING')}</span>
+            <b>{joints ? `${received} / 29` : '— / 29'}</b>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

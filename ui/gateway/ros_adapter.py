@@ -6,6 +6,8 @@ import concurrent.futures
 import queue
 import threading
 import time
+import json
+import uuid
 from collections import deque
 from typing import Any, Callable
 
@@ -20,6 +22,19 @@ class Ros2Adapter:
         self.running = True
         self.subs: dict[Client, list[Any]] = {}
         self.stats: dict[str, deque] = {}
+        self.config_client = None
+        self.config_node = ""
+        self.config_lock = threading.Lock()
+        self.config_checked = 0.0
+        self.config_cache: dict = {}
+        self.control_owner = None
+        self.control_session = ""
+        self.control_environment = ""
+        self.control_sequence = 0
+        self.control_last = 0.0
+        self.control_activated = 0.0
+        self.control_received = 0.0
+        self.control_runtime: dict = {}
         self.thread = threading.Thread(
             target=self._run, name="ros-telemetry", daemon=True
         )
@@ -46,6 +61,14 @@ class Ros2Adapter:
                 "aerospace_telemetry_gateway", context=context, enable_rosout=False
             )
             self.node = node
+            from diagnostic_msgs.msg import DiagnosticArray
+            from std_msgs.msg import String
+            from rclpy.qos import qos_profile_sensor_data, QoSProfile
+
+            self.control_publisher = node.create_publisher(String, "/anakin/web_input", QoSProfile(depth=32))
+            self.control_subscription = node.create_subscription(
+                DiagnosticArray, "/anakin/input_state", self._control_feedback, qos_profile_sensor_data
+            )
             executor = SingleThreadedExecutor(context=context)
             executor.add_node(node)
             self.ready.set()
@@ -78,6 +101,180 @@ class Ros2Adapter:
 
     def graph(self) -> list[dict]:
         return self.call(self._graph)
+
+    def _control_feedback(self, message):
+        for status in message.status:
+            if status.name != "anakin_env/web_control":
+                continue
+            values = {item.key: item.value for item in status.values}
+            if values.get("schema_version") != "1":
+                continue
+            self.control_runtime = values
+            self.control_received = time.monotonic()
+
+    def _control_view(self, client):
+        values = self.control_runtime
+        timeout = min(1.0, max(0.05, int(values.get("timeout_ms", "250")) / 1000))
+        available = bool(values) and time.monotonic() - self.control_received <= timeout
+        if self.control_owner is not None and (
+            not available or time.monotonic() - self.control_last > timeout
+            or values.get("environment") != self.control_environment
+            or (not values.get("session") and time.monotonic() - self.control_activated > timeout)
+        ):
+            self._release_control(self.control_owner)
+        mine = self.control_owner is client
+        owned = mine and available and values.get("session") == self.control_session
+        pending = mine and available and not owned and not values.get("session")
+        if mine and available and values.get("session") and not owned:
+            self._release_control(client)
+        return {
+            "available": available,
+            "timeout_ms": int(timeout * 1000),
+            "sdk_publish_count": int(values.get("sdk_publish_count", "0")),
+            "enabled": available and values.get("enabled") == "true",
+            "owned": owned,
+            "pending": pending,
+            "leased": available and bool(values.get("session")),
+            "environment": values.get("environment", "") if available else "",
+            "active_source": values.get("active_source", "none") if available else "none",
+            "mode": values.get("mode", "") if available else "",
+            "state": values.get("state", "") if available else "",
+            "requested_state": values.get("requested_state", "") if available else "",
+            "moving": available and values.get("moving") == "true",
+            "height": float(values.get("height", "0")) if available else 0,
+            "actions": {key[7:]: value == "true" for key, value in values.items() if key.startswith("action.")} if available else {},
+            "message": values.get("error", "") if available else "Waiting for live ENV control state",
+        }
+
+    def control_status(self, client):
+        return self.call(lambda: self._control_view(client))
+
+    def control(self, client, request):
+        return self.call(lambda: self._control(client, request))
+
+    def _control(self, client, request):
+        from .control import control_request
+        # Also validate callers outside the WebSocket handler.
+        request = control_request({"v": 1, "kind": "control", **request})
+        operation = request["operation"]
+        if operation == "release":
+            self._release_control(client)
+            return self._control_view(client)
+        view = self._control_view(client)
+        if not view["available"] or not view["enabled"]:
+            raise ValueError("Live ENV web control is unavailable")
+        endpoints = self.node.get_publishers_info_by_topic("/anakin/input_state")
+        if len(endpoints) != 1:
+            raise ValueError("Expected one running ENV input publisher")
+        if operation == "activate":
+            if self.control_owner is not None or view["leased"]:
+                raise ValueError("Another browser already holds web control")
+            self.control_owner = client
+            self.control_session = uuid.uuid4().hex
+            self.control_environment = view["environment"]
+            self.control_sequence = 0
+            self.control_activated = time.monotonic()
+        elif self.control_owner is not client or not (view["owned"] or view["pending"]):
+            raise ValueError("Activate web control before sending input")
+        elif "action" in request and (not view["owned"] or not view["actions"].get(request["action"], False)):
+            raise ValueError("Action is not currently available")
+        self.control_last = time.monotonic()
+        self._publish_control(request)
+        return self._control_view(client)
+
+    def _publish_control(self, request):
+        from std_msgs.msg import String
+        self.control_sequence += 1
+        packet = {
+            "v": 1, "environment": self.control_environment,
+            "session": self.control_session, "sequence": self.control_sequence,
+            "sent_ms": time.time_ns() // 1_000_000,
+            "axes": [0.0] * 4, "buttons": [False] * 10, "shoulders": 0,
+            **request,
+        }
+        message = String()
+        message.data = json.dumps(packet, allow_nan=False, separators=(",", ":"))
+        self.control_publisher.publish(message)
+
+    def _release_control(self, client):
+        if self.control_owner is client:
+            self._publish_control({"operation": "release"})
+            self.control_owner = None
+            self.control_session = ""
+
+    def release_control(self, client):
+        self.call(lambda: self._release_control(client))
+
+    def input_config(self) -> dict:
+        """Read only the unique input publisher's effective startup YAML.
+
+        The ROS executor keeps spinning while the parameter response is pending.
+        Never guess a local file, node name, or default controller mapping.
+        """
+        import yaml
+
+        with self.config_lock:
+            if time.monotonic() - self.config_checked < 0.75:
+                return self.config_cache
+            response: concurrent.futures.Future = concurrent.futures.Future()
+            pending = None
+            try:
+                provider, client, pending = self.call(
+                    lambda: self._request_input_config(response)
+                )
+                values = response.result(timeout=0.5).values
+                if len(values) != 4 or [v.type for v in values] != [4, 4, 4, 2]:
+                    raise ValueError("Runtime input configuration parameters unavailable")
+                config = yaml.safe_load(values[0].string_value)
+                if not isinstance(config, dict) or config.get("schema_version") != 2:
+                    raise ValueError("Unsupported runtime input configuration")
+                result = {
+                    "available": True,
+                    "node": provider,
+                    "path": values[1].string_value,
+                    "mode_path": values[2].string_value,
+                    "input_timeout_ms": values[3].integer_value,
+                    "config": config,
+                }
+            except (RuntimeError, ValueError, TimeoutError, yaml.YAMLError) as exc:
+                result = {"available": False, "message": str(exc) or "Runtime configuration request timed out"}
+            finally:
+                if pending is not None and not pending.done():
+                    self.call(lambda: client.remove_pending_request(pending))
+            self.config_cache = result
+            self.config_checked = time.monotonic()
+            return result
+
+    def _request_input_config(self, response):
+        from rcl_interfaces.srv import GetParameters
+
+        endpoints = self.node.get_publishers_info_by_topic("/anakin/input_state")
+        if len(endpoints) != 1:
+            raise RuntimeError("Expected one running env input publisher")
+        endpoint = endpoints[0]
+        provider = f"{endpoint.node_namespace.rstrip('/')}/{endpoint.node_name}"
+        if provider != self.config_node:
+            if self.config_client:
+                self.node.destroy_client(self.config_client)
+            self.config_node = provider
+            self.config_client = self.node.create_client(
+                GetParameters, f"{provider}/get_parameters"
+            )
+        client = self.config_client
+        if not client.service_is_ready():
+            raise RuntimeError("Runtime configuration service not ready")
+        request = GetParameters.Request()
+        request.names = ["input_config_yaml", "input_config_path", "mode_config_path", "input_timeout_ms"]
+        pending = client.call_async(request)
+
+        def complete(future):
+            try:
+                response.set_result(future.result())
+            except Exception as exc:
+                response.set_exception(exc)
+
+        pending.add_done_callback(complete)
+        return provider, client, pending
 
     def _graph(self):
         now = time.monotonic()

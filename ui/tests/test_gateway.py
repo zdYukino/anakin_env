@@ -29,6 +29,9 @@ def test_bounded_queue_and_limits():
 
 
 class FakeAdapter:
+    def input_config(self):
+        return {"available": False, "message": "No running env"}
+
     def graph(self):
         return [{"name": "/test", "type": "std_msgs/msg/Float64"}]
 
@@ -51,7 +54,7 @@ class FakeAdapter:
 
 def test_read_only_websocket_contract():
     with TestClient(create_app(FakeAdapter())) as api:
-        assert api.get("/api/health").json()["read_only"] is True
+        assert api.get("/api/health").json()["read_only"] is False
         with api.websocket_connect("/ws") as ws:
             assert ws.receive_json()["kind"] == "hello"
             ws.send_json({"v": 1, "kind": "publish", "topic": "/robot/control"})
@@ -68,3 +71,24 @@ def test_read_only_websocket_contract():
             while (packet := ws.receive_json())["kind"] != "batch":
                 pass
             assert packet["samples"][0]["values"]["data"] == 2
+
+
+def test_runtime_configuration_is_streamed_from_adapter():
+    class RuntimeAdapter(FakeAdapter):
+        def input_config(self):
+            return {
+                "available": True,
+                "node": "/isolated/env",
+                "path": "/selected/non-default.yaml",
+                "config": {"controller_bindings": [{"button": "Y", "trigger": "released", "action": "hold"}]},
+            }
+
+    with TestClient(create_app(RuntimeAdapter())) as api:
+        with api.websocket_connect("/ws") as ws:
+            for _ in range(10):
+                packet = ws.receive_json()
+                if packet["kind"] == "input_config":
+                    break
+            assert packet["kind"] == "input_config"
+            assert packet["path"] == "/selected/non-default.yaml"
+            assert packet["config"]["controller_bindings"][0]["button"] == "Y"

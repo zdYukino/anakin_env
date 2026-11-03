@@ -5,7 +5,7 @@ export type View =
   | 'Workbench'
   | 'Topics'
   | 'Telemetry'
-  | 'Robotics'
+  | 'Controllers'
   | 'Playback'
   | 'Diagnostics'
   | 'Settings';

@@ -4,9 +4,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { RotateCcw, Move3D, Box } from 'lucide-react';
-import { numberAt } from '../core/types';
 import { telemetry } from '../core/telemetry';
-import { findJoints, validGroup } from '../core/robot';
+import { findJoints, robotPose, type RobotPose } from '../core/robot';
 
 interface ModelNode {
   name: string;
@@ -192,16 +191,30 @@ export function RobotViewer({
     });
     observer.observe(element);
     let last = 0;
+    let pose: RobotPose | undefined,
+      poseSession = telemetry.session,
+      poseMode = telemetry.mode,
+      poseTime = -Infinity;
     const rotation = new THREE.Quaternion();
     const render = (now: number) => {
       frame = requestAnimationFrame(render);
       if (now - last < 33) return;
       last = now;
       const snapshot = telemetry.at('/anakin/state') || telemetry.at();
-      const joints = findJoints(snapshot?.data);
-      const angles = new Map(joints?.name.map((name, i) => [name, joints.position[i]]) || []);
+      if (
+        poseSession !== telemetry.session ||
+        telemetry.mode !== 'LIVE' ||
+        poseMode !== telemetry.mode ||
+        (snapshot && snapshot.t < poseTime)
+      ) {
+        pose = undefined;
+        poseSession = telemetry.session;
+      }
+      poseMode = telemetry.mode;
+      pose = robotPose(snapshot?.data, pose);
+      poseTime = snapshot?.t ?? -Infinity;
       bindings.forEach((binding, name) => {
-        const value = angles.get(name),
+        const value = pose?.angles.get(name),
           angle = value !== undefined && Number.isFinite(value) ? value : 0;
         rotation.setFromAxisAngle(binding.axis, angle);
         binding.group.quaternion.copy(binding.base).multiply(rotation);
@@ -211,20 +224,10 @@ export function RobotViewer({
           .sub(binding.pivot.clone().applyQuaternion(binding.group.quaternion));
       });
       if (base) {
-        const q = ['x', 'y', 'z', 'w'].map((axis) =>
-          numberAt(snapshot?.data, `imu.orientation.${axis}`),
-        );
-        if (
-          validGroup(snapshot?.data, 2) &&
-          q.every((v) => v !== undefined && Number.isFinite(v)) &&
-          q.reduce<number>((n, v) => n + (v ?? 0) ** 2, 0) > 0.1
-        )
-          base.quaternion.set(q[0]!, q[1]!, q[2]!, q[3]!).normalize();
+        const q = pose.orientation;
+        if (q) base.quaternion.set(q[0], q[1], q[2], q[3]).normalize();
         else base.quaternion.identity();
-        const z = validGroup(snapshot?.data, 16)
-          ? numberAt(snapshot?.data, 'odometry.pose.pose.position.z')
-          : undefined;
-        base.position.z = z !== undefined && Number.isFinite(z) ? z : 0.793;
+        base.position.z = pose.height ?? 0.793;
       }
       controls.update();
       renderer.render(scene, camera);

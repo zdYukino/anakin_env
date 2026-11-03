@@ -2,6 +2,21 @@
 #include <algorithm>
 
 namespace anakin::env {
+namespace {
+class SimulatedMotionSwitcher final : public MotionSwitcherApi {
+ public:
+  void initialize(float) override {}
+  int32_t check_mode(std::string& form, std::string& name, float) override {
+    form.clear();
+    name.clear();
+    return 0;  // The simulator has no factory motion service to relinquish.
+  }
+  int32_t release_mode(float) override { return 0; }
+};
+}  // namespace
+std::unique_ptr<MotionSwitcherApi> make_simulated_motion_switcher() {
+  return std::make_unique<SimulatedMotionSwitcher>();
+}
 struct AsyncAuthority::Job {
   AuthorityRecord record;
   Clock::time_point deadline;

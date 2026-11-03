@@ -57,15 +57,17 @@ describe('workstation interactions (DOM; not browser visual verification)', () =
   it('removes, adds, collapses and restores panels; saves layout and changes precision', () => {
     render(<App />);
     fireEvent.click(screen.getByRole('button', { name: 'Workbench' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Remove ROBOT STATE' }));
+    expect(screen.queryByText('ROBOT STATE')).toBeNull();
     expect(screen.queryByTestId('model-slot')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove JOINT TELEMETRY' }));
+    expect(screen.queryByText('Joint position')).toBeNull();
     fireEvent.change(screen.getByRole('combobox', { name: 'Add data view' }), {
-      target: { value: 'robot' },
+      target: { value: 'trend' },
     });
-    expect(screen.getByTestId('model-slot')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse ROBOT STATE' }));
-    expect(screen.queryByTestId('model-slot')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Expand ROBOT STATE' }));
+    expect(screen.getByText('Joint position')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse JOINT TELEMETRY' }));
+    expect(screen.queryByText('Joint position')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand JOINT TELEMETRY' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save layout' }));
     expect(JSON.parse(localStorage.getItem('aerospace.layout.v1')!).hidden).toEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Collapse inspector' }));

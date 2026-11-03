@@ -1,1 +1,1 @@
-"""Read-only robotics telemetry gateway."""
+"""Robotics telemetry and explicitly leased web input gateway."""

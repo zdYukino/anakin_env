@@ -1,11 +1,18 @@
 import { RingBuffer } from './buffer';
 import { channelId, COLORS, unitFor, isRecord } from './types';
 import type { Channel, Connection, Json, Sample, Snapshot, Topic, SchemaField } from './types';
+import { decodeInputConfig, INPUT_TOPIC } from './inputs';
+import type { RuntimeInputConfig } from './inputs';
+import { switchEvents } from './events';
+import type { SwitchEvent } from './events';
+import { decodeControlState, neutralInput } from './control';
+import type { ControlState, WebInput } from './control';
 
 export interface LogEntry {
   time: number;
   level: 'INFO' | 'WARN' | 'ERROR';
   text: string;
+  controlEvent?: SwitchEvent;
 }
 export class TelemetryStore {
   source: 'none' | 'ros2' | 'demo' | 'file' = 'none';
@@ -17,6 +24,8 @@ export class TelemetryStore {
   snapshots = new Map<string, Snapshot[]>();
   snapshotArrival = new Map<string, number>();
   logs: LogEntry[] = [];
+  latestEvent?: LogEntry;
+  private controlEventKeys = new Set<string>();
   listeners = new Set<() => void>();
   version = 0;
   mode: 'LIVE' | 'PAUSED' | 'HISTORY' | 'PLAYBACK' = 'LIVE';
@@ -41,6 +50,15 @@ export class TelemetryStore {
   notation: 'fixed' | 'scientific' = 'fixed';
   selectedTopic = '/anakin/state';
   selectedChannel = '';
+  inputConfig?: RuntimeInputConfig;
+  inputConfigMessage = '';
+  control?: ControlState;
+  controlMessage = '';
+  webRequested = false;
+  webInput = neutralInput();
+  private controlArrival = 0;
+  private activationPendingUntil = 0;
+  private controlTimer?: ReturnType<typeof setInterval>;
   socket?: WebSocket;
   stopSource?: () => void;
   private generation = 0;
@@ -53,7 +71,7 @@ export class TelemetryStore {
   private lastEmit = 0;
   private topicTimes = new Map<string, number>();
   constructor() {
-    this.log('INFO', 'Workspace initialized · read-only');
+    this.log('INFO', 'Workspace initialized');
   }
   get session() {
     return this.generation;
@@ -69,8 +87,10 @@ export class TelemetryStore {
     this.version++;
     this.listeners.forEach((fn) => fn());
   }
-  log(level: LogEntry['level'], text: string) {
-    this.logs.push({ time: Date.now(), level, text });
+  log(level: LogEntry['level'], text: string, controlEvent?: SwitchEvent) {
+    const entry = { time: controlEvent?.timeMs ?? Date.now(), level, text, controlEvent };
+    this.logs.push(entry);
+    this.latestEvent = entry;
     if (this.logs.length > 200) this.logs.shift();
   }
   resetRateWindow() {
@@ -110,18 +130,24 @@ export class TelemetryStore {
     this.timer = 0;
   }
   disconnect() {
+    this.releaseWeb();
+    this.control = undefined;
+    this.controlMessage = '';
     clearTimeout(this.subscriptionTimer);
     this.generation++;
     this.stopSource?.();
     this.stopSource = undefined;
     this.socket?.close();
     this.socket = undefined;
+    this.inputConfig = undefined;
+    this.inputConfigMessage = '';
     if (this.source === 'ros2') this.connection = 'DISCONNECTED';
     this.emit();
   }
   reset(source: TelemetryStore['source']) {
     this.disconnect();
     this.source = source;
+    this.latestEvent = undefined;
     this.graphInitialized = false;
     this.buffers.clear();
     this.snapshots.clear();
@@ -189,9 +215,9 @@ export class TelemetryStore {
     this.subscriptionTimer = setTimeout(() => {
       if (session !== this.generation || this.socket?.readyState !== WebSocket.OPEN) return;
       const requests = new Map<string, string[]>();
-      // Keep the overview's robot state subscribed while inspecting other topics.
-      if (this.topics.some((topic) => topic.name === '/anakin/state'))
-        requests.set('/anakin/state', []);
+      // Keep overview and both controllers active while inspecting other topics.
+      for (const topic of ['/anakin/state', INPUT_TOPIC])
+        if (this.topics.some((item) => item.name === topic)) requests.set(topic, []);
       requests.set(this.selectedTopic, []);
       this.channels.forEach((c) =>
         requests.set(c.topic, [...(requests.get(c.topic) || []), c.path]),
@@ -261,6 +287,19 @@ export class TelemetryStore {
         rows.shift();
     }
     this.snapshots.set(snapshot.topic, rows);
+    if (snapshot.topic === INPUT_TOPIC && this.source === 'ros2') {
+      for (const event of switchEvents(snapshot.data)) {
+        if (this.controlEventKeys.has(event.id)) continue;
+        this.controlEventKeys.add(event.id);
+        if (this.controlEventKeys.size > 512)
+          this.controlEventKeys.delete(this.controlEventKeys.values().next().value!);
+        this.log(
+          event.result === 'failed' ? 'ERROR' : event.result === 'cancelled' ? 'WARN' : 'INFO',
+          `${event.source} -> ${event.target}: ${event.result}`,
+          event,
+        );
+      }
+    }
   }
   at(topic = this.selectedTopic, time = this.cursor): Snapshot | undefined {
     const rows = this.snapshots.get(topic);
@@ -292,6 +331,7 @@ export class TelemetryStore {
     return [right - this.window, right];
   }
   seek(t: number) {
+    this.releaseWeb();
     if (this.mode === 'LIVE') this.viewEnd = this.end;
     this.cursor = Math.max(this.start, Math.min(this.end, t));
     this.mode = this.source === 'file' ? 'PLAYBACK' : 'HISTORY';
@@ -303,6 +343,7 @@ export class TelemetryStore {
       if (this.cursor >= this.end) this.cursor = this.start;
       this.playing = !this.playing;
     } else if (this.mode === 'LIVE') {
+      this.releaseWeb();
       this.mode = 'PAUSED';
       this.viewEnd = this.end;
       this.playing = false;
@@ -344,6 +385,10 @@ export class TelemetryStore {
     };
     ws.onerror = () => {
       if (token !== this.generation) return;
+      this.releaseWeb();
+      this.control = undefined;
+      this.inputConfig = undefined;
+      this.inputConfigMessage = '';
       this.connection = 'ERROR';
       this.error = 'Gateway connection failed. Check URL, ROS environment and gateway process.';
       this.log('ERROR', this.error);
@@ -351,6 +396,10 @@ export class TelemetryStore {
     };
     ws.onclose = () => {
       if (token !== this.generation) return;
+      this.releaseWeb();
+      this.control = undefined;
+      this.inputConfig = undefined;
+      this.inputConfigMessage = '';
       if (this.connection !== 'ERROR') this.connection = 'DISCONNECTED';
       this.log('WARN', 'Gateway socket closed');
       this.emit();
@@ -362,11 +411,13 @@ export class TelemetryStore {
     switch (value.kind) {
       case 'hello':
         this.connection = 'CONNECTED';
-        this.log('INFO', `ROS2 connected · domain ${value.domain_id} · read-only`);
+        this.log('INFO', `ROS2 connected · domain ${value.domain_id}`);
         break;
       case 'topics': {
         if (!Array.isArray(value.topics)) throw new Error('topics must be an array');
-        const hadRobotState = this.topics.some((topic) => topic.name === '/anakin/state');
+        const previousSources = ['/anakin/state', INPUT_TOPIC].map((name) =>
+          this.topics.some((topic) => topic.name === name),
+        );
         this.topics = value.topics.filter(
           (t): t is Topic =>
             isRecord(t) &&
@@ -387,7 +438,12 @@ export class TelemetryStore {
             );
           }
           this.inspectTopic(primary.name);
-        } else if (hadRobotState !== this.topics.some((topic) => topic.name === '/anakin/state')) {
+        } else if (
+          previousSources.some(
+            (had, i) =>
+              had !== this.topics.some((topic) => topic.name === ['/anakin/state', INPUT_TOPIC][i]),
+          )
+        ) {
           this.syncSubscriptions();
         }
         break;
@@ -403,11 +459,44 @@ export class TelemetryStore {
             type: value.type,
           });
         break;
+      case 'control_state': {
+        if (this.source !== 'ros2') break;
+        const control = decodeControlState(value);
+        if (
+          !control ||
+          (this.control?.environment && control.environment !== this.control.environment)
+        )
+          this.releaseWeb();
+        this.control = control;
+        this.controlArrival = performance.now();
+        const awaitingActivation = this.activationPendingUntil > performance.now();
+        if (control?.owned || control?.pending) this.activationPendingUntil = 0;
+        if (
+          this.webRequested &&
+          (!control?.available || (!control.owned && !control.pending && !awaitingActivation))
+        ) {
+          this.controlMessage = control?.message || 'Web control released';
+          this.releaseWeb();
+        }
+        break;
+      }
+      case 'input_config':
+        this.inputConfig = decodeInputConfig(value);
+        this.inputConfigMessage = this.inputConfig
+          ? ''
+          : String(value.message || 'Runtime input configuration unavailable');
+        break;
       case 'status':
         if (['CONNECTED', 'DEGRADED', 'ERROR'].includes(String(value.state)))
           this.connection = value.state as Connection;
         break;
       case 'error':
+        if (value.code === 'CONTROL_REJECTED') {
+          this.controlMessage = String(value.message || 'Control request rejected');
+          this.log('WARN', this.controlMessage);
+          if (!this.control?.owned) this.releaseWeb();
+          break;
+        }
         this.error = String(value.message || 'Gateway error');
         this.log('ERROR', this.error);
         if (value.code === 'ROS_UNAVAILABLE') this.connection = 'ERROR';
@@ -438,6 +527,73 @@ export class TelemetryStore {
         break;
     }
     this.emit();
+  }
+  get canWebControl() {
+    return (
+      this.source === 'ros2' &&
+      ['CONNECTED', 'DEGRADED'].includes(this.connection) &&
+      this.mode === 'LIVE' &&
+      Boolean(this.control?.available && this.control.enabled) &&
+      performance.now() - this.controlArrival <= (this.control?.timeoutMs ?? 250)
+    );
+  }
+  get webActive() {
+    return this.webRequested && this.canWebControl && Boolean(this.control?.owned);
+  }
+  private sendControl(request: Record<string, unknown>) {
+    if (this.socket?.readyState !== WebSocket.OPEN || this.socket.bufferedAmount > 65536)
+      return false;
+    this.socket.send(JSON.stringify({ v: 1, kind: 'control', ...request }));
+    return true;
+  }
+  activateWeb() {
+    if (!this.canWebControl || this.control?.leased || this.webRequested) return false;
+    this.webInput = neutralInput();
+    this.controlMessage = '';
+    if (!this.sendControl({ operation: 'activate' })) return false;
+    this.webRequested = true;
+    this.activationPendingUntil = performance.now() + (this.control?.timeoutMs ?? 250);
+    clearInterval(this.controlTimer);
+    this.controlTimer = setInterval(() => {
+      if (!this.webRequested) return;
+      if (
+        !this.canWebControl ||
+        (this.activationPendingUntil > 0 && performance.now() >= this.activationPendingUntil)
+      ) {
+        this.releaseWeb();
+        this.emit();
+        return;
+      }
+      this.sendControl({ operation: 'input', ...this.webInput });
+    }, 50);
+    this.emit();
+    return true;
+  }
+  releaseWeb() {
+    clearInterval(this.controlTimer);
+    this.controlTimer = undefined;
+    if (this.webRequested) this.sendControl({ operation: 'release' });
+    this.webRequested = false;
+    this.activationPendingUntil = 0;
+    this.webInput = neutralInput();
+  }
+  setWebInput(input: WebInput) {
+    if (!this.webActive) return;
+    this.webInput = {
+      axes: [...input.axes],
+      buttons: [...input.buttons],
+      shoulders: input.shoulders,
+    };
+    this.sendControl({ operation: 'input', ...this.webInput });
+  }
+  neutralWeb() {
+    this.webInput = neutralInput();
+    if (this.webRequested) this.sendControl({ operation: 'input', ...this.webInput });
+  }
+  command(action: string) {
+    if (!this.webActive || !this.control?.actions[action]) return false;
+    this.controlMessage = '';
+    return this.sendControl({ operation: 'input', ...this.webInput, action });
   }
 }
 export const telemetry = new TelemetryStore();

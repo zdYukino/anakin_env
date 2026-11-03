@@ -2,6 +2,7 @@
 #include <anakin_env/runtime.hpp>
 #include <anakin_env/startup.hpp>
 #include <anakin_env/control.hpp>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -76,7 +77,7 @@ struct Fixture {
   Uuid instance = new_uuid();
   std::optional<Frame> frame;
   Fixture(ModeConfig config, bool initial_feedback = true)
-      : mode(std::move(config)), backend(mode.mode == RuntimeMode::Sim),
+      : mode(std::move(config)), backend(mode.mode == RuntimeMode::Sim && !mode.real_checks),
         core(mode, backend, [this] { return input; }, [this] { return now; }) {
     input.primary_online = true; input.primary_acquired = now;
     if (initial_feedback) core.feedback(sample(++generation, sdk_tick, now));
@@ -148,6 +149,17 @@ void pd() {
   }
   check(sim.motor_cmd()[10].q() > upper_limits()[10] && sim.mode_machine() == 5 && sim.mode_pr() == 0,
         "Right ankle reference is neither projected nor compensated");
+  const auto standing = stand_pose();
+  const auto loco = encode_policy_pd(standing, 5, merged_gain_profile, "asap_loco");
+  for (size_t i = 12; i < 29; ++i) {
+    const bool wrist = (i >= 19 && i <= 21) || (i >= 26 && i <= 28);
+    const auto kp = i < 15 ? 200.f : (wrist ? 20.f : 40.f);
+    const auto kd = i < 15 ? 6.f : 2.f;
+    const auto& motor = loco.motor_cmd()[i];
+    check(motor.mode() == 1 && motor.q() == static_cast<float>(standing[i]) &&
+          motor.dq() == 0.f && motor.tau() == 0.f && motor.kp() == kp && motor.kd() == kd,
+          "Loco non-policy joints use basic G1 standing PD gains and reference");
+  }
   for (size_t i = 29; i < sim.motor_cmd().size(); ++i)
     check(sim.motor_cmd()[i].mode() == 0 && sim.motor_cmd()[i].kp() == 0, "Unused HG motor slots stay disabled");
   LowCommand assigned;
@@ -172,8 +184,227 @@ void pd() {
   check(release.crc() == object_crc(release), "Zero-gain release has a valid actual-object CRC");
 }
 
+void availability(const fs::path& configs) {
+  const auto real = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
+  Fixture missing(real, false);
+  check(!missing.core.action_available(InputAction::Align, missing.input) && missing.core.action_available(InputAction::EmergencyStop, missing.input),
+        "Missing real feedback grays Align while emergency remains available");
+  Fixture robot(real);
+  check(robot.core.action_available(InputAction::Align, robot.input) && !robot.core.action_available(InputAction::Hold, robot.input) &&
+        !robot.core.action_available(InputAction::AsapLoco, robot.input), "Real Disarmed exposes only valid entry routes");
+  const auto before = robot.core.snapshot().generation;
+  for (int i = 0; i < 10; ++i) (void)robot.core.action_available(InputAction::Align, robot.input);
+  check(robot.core.snapshot().generation == before && robot.backend.actions.empty(), "Availability probing never changes state or requests authority");
+  robot.input.primary_online = false;
+  check(!robot.core.action_available(InputAction::Align, robot.input), "Real entry availability uses the same input guard as tick");
+  robot.input.primary_online = true;
+  robot.now += real.guards.state_timeout + 1ms;
+  check(!robot.core.action_available(InputAction::Align, robot.input), "Feedback staleness immediately grays real actions");
+  auto sim = load_mode_config(configs / "sim.yaml", RuntimeMode::Sim);
+  sim.manual_transitions.erase(std::remove_if(sim.manual_transitions.begin(), sim.manual_transitions.end(), [](const Transition& route) {
+    return route.to == State::Hold;
+  }), sim.manual_transitions.end());
+  Fixture configured(sim);
+  check(configured.core.action_available(InputAction::Align, configured.input) && !configured.core.action_available(InputAction::Hold, configured.input),
+        "Loaded YAML route changes alter availability without a frontend transition table");
+  configured.cycle({Event::system(EventKind::Fault)});
+  check(configured.core.action_available(InputAction::ClearFault, configured.input) && !configured.core.action_available(InputAction::Align, configured.input),
+        "Latched Fault exposes clear_fault rather than ordinary state switches");
+}
+
+void real_posture_switching(const ModeConfig& real) {
+  // Exercise the production controller with fresh but fallen, low and out-of-range feedback.
+  for (const bool checked_sim : {false, true}) {
+    auto mode = real;
+    if (checked_sim) {
+      mode.mode = RuntimeMode::Sim;
+      mode.real_checks = true;
+    }
+    Fixture f(mode);
+    f.backend.progress = AuthorityProgress::Owned;
+    const auto step = [&](const std::vector<Event>& events = {}) {
+      f.now += 2ms;
+      f.input.primary_acquired = f.now;
+      auto measured = sample(++f.generation, ++f.sdk_tick, f.now, true);
+      measured.frame.joints.position[0] = 3.5;
+      measured.frame.joints.position[3] = -1.5;
+      measured.frame.validity |= Frame::VALID_ODOMETRY;
+      measured.frame.odometry.pose.pose.position.z = .05;
+      f.core.feedback(measured);
+      const auto result = f.core.tick(InputFrame{f.input, {}, events});
+      f.frame = f.core.take_frame(f.input);
+      return result;
+    };
+    step();
+    check(f.core.action_available(InputAction::Align, f.input),
+          "Real rules allow Align despite base tilt, low height and measured joint angles");
+    check(step({Event::manual(State::Align)}).decision == Decision::Accepted &&
+          f.backend.owned && !f.backend.commands.empty() &&
+          f.backend.commands.front().motor_cmd()[0].q() == 3.5f,
+          "Alignment acquires authority and starts from the actual out-of-range angle");
+    for (int i = 0; i < 1002; ++i) step();
+    check(f.core.snapshot().state == State::Hold && f.backend.commands.back().motor_cmd()[0].kp() > 0 &&
+          f.core.action_available(InputAction::AsapLoco, f.input),
+          "Alignment continues through Hold with the same unrestricted measured posture");
+    f.discover();
+    step({Event::manual(State::AsapLoco)});
+    auto loco = f.target();
+    check(f.core.target(loco), "Loco target accepted for unrestricted measured posture");
+    f.active_status(loco); step(); step();
+    check(f.core.snapshot().state == State::AsapLoco &&
+          f.core.action_available(InputAction::AsapCr7, f.input),
+          "Loco becomes active and permits the next configured transition");
+    step({Event::manual(State::AsapCr7)});
+    auto mimic = f.target();
+    check(f.core.target(mimic), "Mimic target accepted for unrestricted measured posture");
+    f.active_status(mimic); step(); step();
+    check(f.core.snapshot().state == State::AsapCr7, "Mimic becomes active at unrestricted angles");
+    f.active_status(mimic, true); step();
+    check(f.core.snapshot().state == State::Preparing && f.core.request() &&
+          f.core.request()->target_model == "asap_loco", "Mimic automatically requests Loco at unrestricted angles");
+    auto returned = f.target();
+    check(f.core.target(returned), "Automatic Loco return accepts a target at unrestricted angles");
+    f.active_status(returned); step(); step();
+    check(f.core.snapshot().state == State::AsapLoco, "Automatic return completes at unrestricted angles");
+  }
+  auto guarded = real;
+  guarded.guards.enforce_measured_joint_limits = true;
+  Fixture limited(guarded);
+  auto measured = sample(++limited.generation, ++limited.sdk_tick, limited.now);
+  measured.frame.joints.position[0] = 3.5;
+  limited.core.feedback(measured);
+  check(!limited.core.action_available(InputAction::Align, limited.input),
+        "A custom configuration can still enable measured joint-angle gating");
+  Fixture nonfinite(real);
+  measured = sample(++nonfinite.generation, ++nonfinite.sdk_tick, nonfinite.now);
+  measured.frame.joints.position[0] = std::numeric_limits<double>::quiet_NaN();
+  nonfinite.core.feedback(measured);
+  check(!nonfinite.core.action_available(InputAction::Align, nonfinite.input),
+        "Nonfinite measured feedback remains invalid");
+}
+
+void source_disconnect(const ModeConfig& sim, const ModeConfig& real) {
+  auto checked_sim = real;
+  checked_sim.mode = RuntimeMode::Sim;
+  checked_sim.real_checks = true;
+  auto legacy_real = real;
+  legacy_real.guards.source_loss = SourceLossPolicy::Fault;
+  for (const auto& mode : {sim, real, checked_sim, legacy_real}) {
+    Fixture f(mode);
+    f.backend.progress = AuthorityProgress::Owned;
+    f.cycle({Event::manual(State::Align)});
+    check(f.core.snapshot().state == State::Align && f.backend.owned && !f.backend.commands.empty(),
+          "Alignment starts with authority and fresh input");
+    const auto alignment_writes = f.core.writer_count();
+    f.input.primary_online = false;
+    f.input.moving = true;
+    f.input.velocity = {.4, .3, .2};
+    f.cycle({Event::system(EventKind::SourceLost)});
+    check(f.core.snapshot().state == State::Align && f.backend.owned &&
+          f.core.writer_count() > alignment_writes && f.backend.commands.back().motor_cmd()[0].kp() > 0 &&
+          f.frame && !f.frame->command_stand && f.frame->command.twist.linear.x == 0. &&
+          f.frame->command.twist.linear.y == 0. && f.frame->command.twist.angular.z == 0.,
+          "Disconnected Align keeps PD output and clears even a stale moving snapshot");
+    for (int i = 0; i < 1002; ++i) f.cycle();
+    check(f.core.snapshot().state == State::Hold && f.backend.owned &&
+          f.backend.commands.back().motor_cmd()[0].kp() > 0,
+          "Alignment completes and holds during a disconnect longer than input timeout");
+    if (mode.guards.require_primary_input) {
+      check(!f.core.action_available(InputAction::AsapLoco, f.input),
+            "A new manual real-mode transition still requires a live primary");
+      f.cycle({Event::manual(State::AsapLoco)});
+      check(f.core.snapshot().state == State::Hold, "Disconnected manual policy request is rejected");
+    }
+    f.input.primary_online = true;
+    f.input.moving = false;
+    f.input.velocity = {};
+    f.discover();
+    f.cycle({Event::manual(State::AsapLoco)});
+    check(f.core.snapshot().state == State::Preparing && f.core.request(), "Live input can request Loco");
+    f.input.primary_online = false;
+    f.cycle({Event::system(EventKind::SourceLost)});
+    check(f.core.snapshot().state == State::Preparing && f.frame && f.frame->execution_authorized,
+          "Preparation keeps inference authorized after input loss");
+    uint64_t sequence = 1;
+    auto loco = f.target(sequence);
+    check(f.core.target(loco), "Fresh Loco output accepted while disconnected");
+    f.active_status(loco); f.cycle(); f.cycle();
+    check(f.core.snapshot().state == State::AsapLoco, "Preparing completes while disconnected");
+    const auto epoch = f.core.request()->next_epoch;
+    const auto request_id = f.core.request()->request_id;
+    const auto loco_writes = f.core.writer_count();
+    f.input.moving = true;
+    f.input.velocity = {.4, .3, .2};
+    for (int i = 0; i < 200; ++i) {
+      if (i % 8 == 0) {
+        auto fresh_target = f.target(++sequence);
+        check(f.core.target(fresh_target), "Policy outputs stay current during a long input disconnect");
+      }
+      f.cycle();
+    }
+    check(f.core.snapshot().state == State::AsapLoco && f.core.request()->next_epoch == epoch &&
+          f.core.request()->request_id == request_id && f.backend.owned && f.core.writer_count() > loco_writes &&
+          f.backend.commands.back().motor_cmd()[0].kp() > 0 && f.frame && f.frame->execution_authorized &&
+          !f.frame->command_stand && f.frame->command.twist.linear.x == 0. &&
+          f.frame->command.twist.linear.y == 0. && f.frame->command.twist.angular.z == 0.,
+          "Disconnected Loco retains its transaction and continuous PD with neutral motion");
+    f.input.primary_online = true;
+    f.input.moving = false;
+    f.input.velocity = {};
+    f.cycle();
+    check(f.frame && !f.frame->command_stand && f.frame->command.twist.linear.x == 0.,
+          "Reconnected neutral input does not replay previous motion");
+    f.input.moving = true;
+    f.input.velocity = {.1, .2, .3};
+    f.cycle();
+    check(f.frame && f.frame->command_stand && f.frame->command.twist.linear.x == .1,
+          "New deliberate motion works after reconnection");
+    f.cycle({Event::manual(State::AsapCr7)});
+    auto mimic = f.target();
+    check(f.core.target(mimic), "Mimic target accepted after input reconnect");
+    f.active_status(mimic); f.cycle(); f.cycle();
+    check(f.core.snapshot().state == State::AsapCr7, "Mimic is active before another input loss");
+    f.input.primary_online = false;
+    f.cycle({Event::system(EventKind::SourceLost)});
+    f.active_status(mimic, true); f.cycle();
+    check(f.core.snapshot().state == State::Preparing && f.core.request() &&
+          f.core.request()->target_model == "asap_loco" && f.frame->execution_authorized,
+          "Mimic can automatically return to Loco without an input source");
+    auto returned = f.target();
+    check(f.core.target(returned), "Automatic return accepts a new Loco target while disconnected");
+    f.active_status(returned); f.cycle(); f.cycle();
+    check(f.core.snapshot().state == State::AsapLoco && f.backend.owned,
+          "Automatic return completes without losing authority");
+  }
+
+  Fixture pending(real);
+  pending.cycle({Event::manual(State::Align)});
+  check(pending.backend.commands.empty(), "Acquisition remains pending before input loss");
+  pending.input.primary_online = false;
+  pending.backend.progress = AuthorityProgress::Owned;
+  pending.cycle({Event::system(EventKind::SourceLost)});
+  check(pending.core.snapshot().state == State::Align && pending.backend.owned &&
+        !pending.backend.commands.empty() && pending.backend.commands.back().motor_cmd()[0].kp() > 0,
+        "A previously requested acquisition can start alignment after input disconnect");
+  pending.now += real.guards.state_timeout + 1ms;
+  pending.cycle({}, false);
+  check(pending.core.snapshot().state == State::Fault && !pending.backend.owned,
+        "Loss of robot feedback still faults even when the operator source is disconnected");
+
+  Fixture stopped(real);
+  stopped.backend.progress = AuthorityProgress::Owned;
+  stopped.cycle({Event::manual(State::Align)});
+  stopped.input.primary_online = false;
+  stopped.input.emergency_stop = true;
+  stopped.cycle({Event::system(EventKind::SourceLost), Event::system(EventKind::EmergencyStop)});
+  check(stopped.core.snapshot().state == State::Damping && stopped.backend.commands.back().motor_cmd()[0].kp() == 0.,
+        "Emergency stop still takes priority while the primary input is disconnected");
+}
+
 void controller(const fs::path& configs) {
   const auto sim = load_mode_config(configs / "sim.yaml", RuntimeMode::Sim);
+  const auto real_for_disconnect = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
+  source_disconnect(sim, real_for_disconnect);
   for (const auto state : business_states()) {
     Fixture fallen(sim);
     fallen.cycle({Event::manual(state)}, true, true);
@@ -246,10 +477,62 @@ void controller(const fs::path& configs) {
   check(cr7.core.snapshot().state == State::Preparing, "Validated target/status alone are not a writer receipt");
   cr7.cycle();
   check(cr7.core.snapshot().state == State::AsapCr7, "CR7 completion of preparation is separate");
+  cr7.input.moving = true;
+  cr7.input.velocity = {.3, -.1, .2};
   cr7.active_status(cr7target, true); cr7.cycle();
   check(cr7.core.snapshot().state == State::Preparing && cr7.core.request()->target_model == "asap_loco" &&
-        cr7.core.request()->next_epoch > cr7target.epoch, "Current CR7 motion completion automatically requests loco");
+        cr7.core.request()->next_epoch > cr7target.epoch &&
+        cr7.core.request()->transition_profile == "g1_direct_v1",
+        "Current CR7 motion completion automatically requests the direct profile");
   check(!cr7.core.target(cr7target), "Superseded CR7 target cannot become a current loco write");
+  check(cr7.frame && !cr7.frame->command_stand && cr7.frame->command.twist.linear.x == 0 &&
+        cr7.frame->command.twist.linear.y == 0 && cr7.frame->command.twist.angular.z == 0,
+        "Automatic return suppresses a velocity command held during CR7");
+  check(cr7.backend.commands.back().motor_cmd()[15].kp() == 90.f &&
+        cr7.backend.commands.back().motor_cmd()[0].q() == 4.f &&
+        cr7.frame->sdk_published_target_seq == 0,
+        "Handover reuses the last written CR7 target and gains without claiming a new-epoch receipt");
+  auto returned = cr7.target(2);
+  check(cr7.core.target(returned), "New loco epoch accepts its own target");
+  cr7.active_status(returned); cr7.cycle(); cr7.cycle();
+  check(cr7.core.snapshot().state == State::AsapLoco && !cr7.frame->command_stand &&
+        cr7.frame->command.twist.linear.x == 0 && cr7.backend.commands.back().motor_cmd()[15].kp() == 40.f,
+        "Held input stays inhibited after active loco is confirmed");
+  cr7.input.velocity = {};
+  cr7.cycle();
+  check(!cr7.frame->command_stand, "Returning the stick to neutral keeps the robot still");
+  cr7.input.velocity = {.15, 0., 0.};
+  cr7.cycle();
+  check(cr7.frame->command_stand && cr7.frame->command.twist.linear.x == .15,
+        "A new movement after neutral resumes normal operator control");
+
+  Fixture expiring(sim); expiring.discover(); expiring.cycle({Event::manual(State::AsapLoco)});
+  auto previous = expiring.target(); check(expiring.core.target(previous), "Previous policy target accepted");
+  expiring.active_status(previous); expiring.cycle(); expiring.cycle();
+  check(expiring.core.snapshot().state == State::AsapLoco, "Previous policy is active before switching");
+  const auto deadline_start = expiring.now;
+  expiring.cycle({Event::manual(State::AsapCr7)});
+  check(expiring.core.request()->transition_profile == "g1_direct_v1" &&
+        expiring.backend.commands.back().motor_cmd()[0].kp() > 0 &&
+        expiring.backend.commands.back().motor_cmd()[0].q() == 4.f,
+        "Any policy direction continues its last written target during the short handover");
+  check(!expiring.core.target(previous), "Old target is not accepted into the new epoch");
+  expiring.now = deadline_start + 50ms;
+  expiring.cycle();
+  check(expiring.backend.commands.back().motor_cmd()[0].kp() == 0.f,
+        "Handover target expires at its original deadline and falls back to damping");
+
+  Fixture stopped_handover(sim); stopped_handover.discover();
+  stopped_handover.cycle({Event::manual(State::AsapLoco)});
+  auto before_stop = stopped_handover.target();
+  check(stopped_handover.core.target(before_stop), "Stop fixture source target accepted");
+  stopped_handover.active_status(before_stop); stopped_handover.cycle(); stopped_handover.cycle();
+  stopped_handover.cycle({Event::manual(State::AsapCr7)});
+  stopped_handover.input.emergency_stop = true;
+  stopped_handover.cycle({Event::system(EventKind::EmergencyStop)});
+  check(stopped_handover.core.snapshot().state == State::Damping &&
+        stopped_handover.backend.commands.back().motor_cmd()[0].kp() == 0.f,
+        "Emergency stop immediately revokes an otherwise fresh handover target");
 
   Fixture reordered(sim); reordered.discover(); reordered.cycle({Event::manual(State::AsapCr7)});
   auto reordered_target = reordered.target();
@@ -262,6 +545,7 @@ void controller(const fs::path& configs) {
   check(reordered.core.snapshot().state == State::AsapCr7, "Status-before-target completes after the matching writer receipt");
 
   const auto real = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
+  real_posture_switching(real);
   auto optional_primary = real;
   optional_primary.guards.require_primary_input = false;
   Fixture absent_entry(optional_primary, false);
@@ -300,10 +584,13 @@ void controller(const fs::path& configs) {
         "Authorized policy preparation can wait for undiscovered MC");
   undiscovered.now += 2ms;
   undiscovered.input.primary_acquired = undiscovered.now - real.guards.input_timeout - 1ms;
+  undiscovered.input.moving = true;
+  undiscovered.input.velocity = {.4, .3, .2};
   undiscovered.core.feedback(sample(++undiscovered.generation, ++undiscovered.sdk_tick, undiscovered.now));
   const auto unpermitted_frame = undiscovered.core.take_frame(undiscovered.input);
-  check(unpermitted_frame && !unpermitted_frame->execution_authorized,
-        "Fresh telemetry with a cached expired primary snapshot cannot authorize MC work");
+  check(unpermitted_frame && unpermitted_frame->execution_authorized && !unpermitted_frame->command_stand &&
+        unpermitted_frame->command.twist.linear.x == 0. && unpermitted_frame->command.twist.angular.z == 0.,
+        "Expired input neutralizes motion while authorized MC work continues");
   undiscovered.now += real.policy_timeout;
   undiscovered.cycle();
   check(undiscovered.core.snapshot().state == State::Fault && !undiscovered.backend.owned &&
@@ -329,7 +616,10 @@ void controller(const fs::path& configs) {
   check(readonly_wait.core.snapshot().state == State::Disarmed && readonly_wait.backend.actions.empty(),
         "Readonly real startup has no feedback/MC failure lifetime or authority side effects");
 
-  Fixture tilted(real); tilted.cycle({}, true, true);
+  auto guarded_real = real;
+  guarded_real.guards.allow_fallen = false;
+  guarded_real.guards.enforce_measured_joint_limits = true;
+  Fixture tilted(guarded_real); tilted.cycle({}, true, true);
   check(tilted.frame && !tilted.frame->execution_authorized && !tilted.frame->diagnostics.status.empty() &&
         tilted.core.snapshot().state == State::Disarmed, "Tilted real Disarmed still publishes valid telemetry with actuation disabled");
   Fixture hardware(real);
@@ -412,20 +702,55 @@ void feedback(const fs::path& configs) {
   check(!f.frame && f.core.state_sequence() == sequence, "Controller never republishes cached feedback with a manufactured sequence");
   f.cycle();
   check(f.frame && f.core.state_sequence() == sequence + 1, "New physical generation advances the independent Env sequence");
+  Fixture sim(load_mode_config(configs / "sim.yaml", RuntimeMode::Sim));
+  sim.cycle({Event::manual(State::Align)});
+  sim.core.malformed_transport_packet();
+  sim.cycle();
+  check(sim.core.snapshot().state == State::Align && sim.frame,
+        "Malformed simulation transport data does not fault or prevent later valid feedback");
+  sim.now += sim.mode.guards.state_timeout + 1ms;
+  sim.cycle({}, false);
+  check(!sim.frame && sim.backend.commands.back().motor_cmd()[0].mode() == 0,
+        "Stale simulation feedback still stops state publication and releases position commands");
+  Fixture real(load_mode_config(configs / "real.yaml", RuntimeMode::Real));
+  real.core.malformed_transport_packet();
+  real.cycle();
+  check(real.core.snapshot().state == State::Fault &&
+        real.core.diagnostic() == "Malformed native feedback or remote packet",
+        "Malformed real transport data still faults");
+  auto checked_sim_config = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
+  checked_sim_config.mode = RuntimeMode::Sim;
+  checked_sim_config.real_checks = true;
+  Fixture checked_sim(checked_sim_config);
+  checked_sim.core.malformed_transport_packet();
+  checked_sim.cycle();
+  check(checked_sim.core.snapshot().state == State::Fault &&
+        checked_sim.core.diagnostic() == "Malformed native feedback or remote packet",
+        "Sim with real checks faults on malformed feedback exactly like real");
+  checked_sim_config.guards.allow_fallen = false;
+  Fixture fallen_checked(checked_sim_config);
+  fallen_checked.cycle({Event::manual(State::Align)}, true, true);
+  check(fallen_checked.core.snapshot().state == State::Disarmed,
+        "Sim with explicitly enabled posture checks rejects a fallen entry");
 }
 void startup(const fs::path& configs) {
   check(parse_startup({"env"}).mode == RuntimeMode::Real, "Default CLI mode is real");
   const auto options = parse_startup({"env", "--sim", "--config", "chosen.yaml", "--input-config", "input.yaml", "--input", "remote", "--ros-args", "-p", "use_sim_time:=false"});
   check(options.mode == RuntimeMode::Sim && options.resources.primary_input == InputSource::Remote &&
         options.resources.config == fs::path("chosen.yaml") && options.ros_arguments.size() == 4, "CLI configuration and ROS forwarding remain separate");
+  const auto checked = parse_startup({"env", "--sim", "--real-checks", "--real-config", "robot.yaml"});
+  check(checked.mode == RuntimeMode::Sim && checked.resources.real_checks &&
+        checked.resources.real_config == fs::path("robot.yaml"), "CLI selects real checks only for simulation");
   const std::vector<std::vector<std::string>> invalid_arguments{{"env", "--loopback-sim"}, {"env", "--sim", "--real"},
-      {"env", "--sim", "--sim"}, {"env", "--config"}, {"env", "--input", "bogus"}};
+      {"env", "--sim", "--sim"}, {"env", "--config"}, {"env", "--input", "bogus"},
+      {"env", "--real", "--real-checks"}, {"env", "--real-checks"},
+      {"env", "--sim", "--real-config", "robot.yaml"}, {"env", "--sim", "--real-checks", "--real-config"}};
   for (const auto& args : invalid_arguments)
     rejected([&] { parse_startup(args); }, "Invalid CLI accepted");
   const auto sim = load_mode_config(configs / "sim.yaml", RuntimeMode::Sim);
   const auto real = load_mode_config(configs / "real.yaml", RuntimeMode::Real);
   check(!sim.guards.strict_deadlines && real.guards.strict_deadlines &&
-        !sim.guards.enforce_measured_joint_limits && real.guards.enforce_measured_joint_limits &&
+        real.guards.allow_fallen && !real.guards.enforce_measured_joint_limits &&
         real.policy_timeout == 5000ms && real.guards.max_tilt_radians == 1. && real.guards.min_base_height == .3,
         "Mode guards and policy timing come from installed typed config");
 }
@@ -436,6 +761,7 @@ int main(int argc, char** argv) {
     const auto configs = fs::canonical(argv[2]); const std::string suite = argv[1];
     if (suite == "controller") controller(configs);
     else if (suite == "pd") pd(); else if (suite == "feedback") feedback(configs);
+    else if (suite == "availability") availability(configs);
     else if (suite == "startup") startup(configs); else throw std::runtime_error("Unknown suite");
     std::cout << suite << " runtime contracts passed\n"; return 0;
   } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

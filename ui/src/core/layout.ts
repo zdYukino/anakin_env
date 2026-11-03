@@ -3,13 +3,12 @@ export interface Layout {
   order: string[];
   hidden: string[];
   collapsed: string[];
-  robotWidth: number;
+  columnWidth: number;
   rowSplit: number;
   navCollapsed: boolean;
   inspector: boolean;
 }
 export const PANEL_NAMES: Record<string, string> = {
-  robot: 'ROBOT STATE',
   trend: 'JOINT TELEMETRY',
   status: 'SYSTEM STATUS',
   imu: 'INERTIAL MEASUREMENT',
@@ -17,10 +16,10 @@ export const PANEL_NAMES: Record<string, string> = {
 };
 export const defaultLayout = (): Layout => ({
   v: 1,
-  order: ['robot', 'trend', 'status', 'imu', 'topics'],
+  order: ['trend', 'imu', 'status', 'topics'],
   hidden: [],
   collapsed: [],
-  robotWidth: 30,
+  columnWidth: 50,
   rowSplit: 60,
   navCollapsed: false,
   inspector: true,
@@ -32,8 +31,7 @@ export function loadLayout(): Layout {
     const order = [
       ...new Set<string>(
         value.order.filter(
-          (id: unknown): id is string =>
-            typeof id === 'string' && typeof id === 'string' && Object.hasOwn(PANEL_NAMES, id),
+          (id: unknown): id is string => typeof id === 'string' && Object.hasOwn(PANEL_NAMES, id),
         ),
       ),
     ];
@@ -51,7 +49,7 @@ export function loadLayout(): Layout {
             (id: string) => typeof id === 'string' && Object.hasOwn(PANEL_NAMES, id),
           )
         : [],
-      robotWidth: Math.max(23, Math.min(48, Number(value.robotWidth) || 30)),
+      columnWidth: Math.max(25, Math.min(75, Number(value.columnWidth) || 50)),
       rowSplit: Math.max(35, Math.min(80, Number(value.rowSplit) || 60)),
       navCollapsed: Boolean(value.navCollapsed),
       inspector: value.inspector !== false,

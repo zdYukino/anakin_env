@@ -235,11 +235,15 @@ void state_contracts(const fs::path& configs) {
     reach(loss, State::AsapLoco);
     const auto generation = loss.snapshot().generation;
     const auto lost = loss.dispatch({Event::system(EventKind::SourceLost)});
-    if (mode == RuntimeMode::Sim)
-      check(lost.after.state == State::AsapLoco && lost.after.generation == generation &&
-            has(lost, Action::ZeroMotion), "Sim source loss zeros motion and retains policy/transaction");
-    else
-      check(lost.after.state == State::Fault && !lost.outputs.lowcmd, "Real source loss follows fault/release path");
+    check(lost.after.state == State::AsapLoco && lost.after.generation == generation &&
+          has(lost, Action::ZeroMotion), "Source loss zeros motion and retains policy/transaction in both modes");
+    auto legacy = config;
+    legacy.guards.source_loss = SourceLossPolicy::Fault;
+    StateMachine legacy_loss(legacy);
+    reach(legacy_loss, State::AsapLoco);
+    const auto legacy_result = legacy_loss.dispatch({Event::system(EventKind::SourceLost)});
+    check(legacy_result.after.state == State::AsapLoco && has(legacy_result, Action::ZeroMotion),
+          "Legacy source_loss fault cannot turn a disconnect into a fault");
 
     for (const bool loss_first : {false, true}) {
       StateMachine simultaneous(config);
@@ -315,20 +319,24 @@ void config_contracts(const fs::path& configs) {
   error([&] { load_mode_config(mode_fixture, RuntimeMode::Sim); }, "$", mode_fixture.string());
   error([&] { load_mode_config(temp.path / "missing.yaml", RuntimeMode::Sim); }, "missing.yaml");
 
-  invalid_input([](auto& n) { n["keyboard_bindings"][0]["key"] = "Z"; }, ".key");
+  invalid_input([](auto& n) { n["web"]["actions"][0] = "unknown"; }, "web.actions");
+  invalid_input([](auto& n) { n["primary"] = "keyboard"; }, "primary");
   invalid_input([](auto& n) { n["controller_bindings"][0]["button"] = "unknown"; }, ".button");
   invalid_input([](auto& n) { n["controller_bindings"][0]["action"] = "reset"; }, ".action");
   invalid_input([](auto& n) { n["controller_bindings"][0]["shoulders"] = "any"; }, ".shoulders");
   invalid_input([](auto& n) { n["controller_bindings"][0]["shoulders"] = YAML::Load("[R1, R1]"); }, ".shoulders");
   invalid_input([](auto& n) { n["controller_bindings"][1]["trigger"] = "released"; }, ".trigger");
-  invalid_input([](auto& n) { n["keyboard_bindings"][0]["trigger"] = "held"; }, ".trigger");
-  invalid_input([](auto& n) { n["keyboard_bindings"].push_back(YAML::Clone(n["keyboard_bindings"][0])); }, "conflicting binding");
+  invalid_input([](auto& n) { n["web"]["actions"] = YAML::Load("[align]"); }, "emergency_stop");
+  invalid_input([](auto& n) { n["web"]["actions"].push_back("align"); }, "duplicate action");
   invalid_input([](auto& n) { n["controller_bindings"][5]["shoulders"] = YAML::Load("[L1, R1]"); }, "conflicting binding");
   invalid_input([](auto& n) { auto b = YAML::Clone(n["controller_bindings"][5]); b["trigger"] = "held"; n["controller_bindings"].push_back(b); }, "conflicting binding");
-  invalid_input([](auto& n) { n["enabled_sources"] = YAML::Load("[gamepad, remote]"); }, "primary");
+  invalid_input([](auto& n) { n["primary"] = "web"; n["enabled_sources"] = YAML::Load("[gamepad, remote]"); }, "primary");
   invalid_input([](auto& n) { n["enabled_sources"].push_back("remote"); }, "duplicate input source");
   invalid_input([](auto& n) { n["motion"]["deadzone"] = 1.0; }, "motion.deadzone");
   invalid_input([](auto& n) { n["motion"]["velocity_axes"]["yaw"]["axis"] = "left_y"; }, ".axis");
+  invalid_input([](auto& n) { n["gamepad"]["mappings"] = "not a list"; }, "gamepad.mappings");
+  invalid_input([](auto& n) { n["gamepad"]["mappings"][0] = "xinput,*,righty:a3"; }, "gamepad.mappings");
+  invalid_input([](auto& n) { n["gamepad"]["mappings"].push_back(YAML::Clone(n["gamepad"]["mappings"][0])); }, "duplicate device GUID");
 
   // A completion-gated cycle is legal; only a no-wait cycle is rejected.
   auto node = YAML::LoadFile(sim_path.string());
@@ -352,18 +360,7 @@ void config_contracts(const fs::path& configs) {
   check(changed.dispatch({}).after.state == State::Align, "YAML changes automatic event behavior");
 
   const auto inputs = load_input_config(input_path);
-  const std::map<Key, InputAction> keyboard_expected{
-      {Key::Digit1, InputAction::Disarmed}, {Key::Digit2, InputAction::EmergencyStop},
-      {Key::Space, InputAction::EmergencyStop}, {Key::Digit3, InputAction::Align},
-      {Key::Digit4, InputAction::Hold}, {Key::Digit5, InputAction::AsapLoco},
-      {Key::Digit6, InputAction::AsapCr7}, {Key::C, InputAction::ClearFault},
-      {Key::W, InputAction::Forward}, {Key::S, InputAction::Backward}, {Key::A, InputAction::Left},
-      {Key::D, InputAction::Right}, {Key::Q, InputAction::TurnLeft}, {Key::E, InputAction::TurnRight},
-      {Key::G, InputAction::MotionToggle}, {Key::Up, InputAction::HeightUp}, {Key::Down, InputAction::HeightDown}};
-  check(inputs.keyboard_bindings.size() == keyboard_expected.size(), "Confirmed keyboard mapping has exact entries");
-  for (const auto& binding : inputs.keyboard_bindings)
-    check(keyboard_expected.at(std::get<KeyboardBinding>(binding.control).key) == binding.action,
-          "Confirmed default keyboard mapping preserved");
+  check(!inputs.primary && inputs.web_actions.size() == 11, "Automatic arbitration and YAML web actions are the default");
   // Exact shoulder sets remain distinct typed values for the Stage B mapper.
   const std::map<std::pair<Button, uint8_t>, InputAction> controller_expected{
       {{Button::Down, shoulder_l1 | shoulder_r1}, InputAction::Disarmed},
@@ -376,7 +373,7 @@ void config_contracts(const fs::path& configs) {
       {{Button::Down, 0}, InputAction::HeightDown}};
   check(inputs.controller_bindings.size() == controller_expected.size() + 2, "Confirmed controller map has exact entries");
   for (const auto& binding : inputs.controller_bindings) {
-    const auto button = std::get<ButtonBinding>(binding.control);
+    const auto button = binding.control;
     if (button.button == Button::A || button.button == Button::B)
       check(button.any_shoulders && binding.action == InputAction::EmergencyStop &&
             binding.trigger == Trigger::Held, "A/B stop applies with all shoulder combinations");
@@ -430,6 +427,80 @@ void resource_contracts(const fs::path& configs) {
   const auto real = load_configuration(RuntimeMode::Real, options);
   check(real.paths.inputs == selected.paths.inputs && real.mode.mode == RuntimeMode::Real,
         "Both modes use the same installed input YAML");
+  ResourceOptions checked_options;
+  checked_options.executable = second_executable;
+  checked_options.real_checks = true;
+  const auto checked = load_configuration(RuntimeMode::Sim, checked_options);
+  check(checked.mode.mode == RuntimeMode::Sim && checked.mode.real_checks && checked.paths.real_checks &&
+        *checked.paths.real_checks == second / "share/anakin_env/config/real.yaml" &&
+        checked.mode.transport.interface == "lo" && checked.mode.transport.sdk_domain == 31 &&
+        checked.mode.transport.odometry_topic == selected.mode.transport.odometry_topic,
+        "Real checks retain the selected loopback simulation transport");
+  const auto& cg = checked.mode.guards;
+  const auto& rg = real.mode.guards;
+  check(cg.allow_fallen == rg.allow_fallen && cg.fault_on_tick_rollback == rg.fault_on_tick_rollback &&
+        cg.require_primary_input == rg.require_primary_input && cg.strict_deadlines == rg.strict_deadlines &&
+        cg.enforce_measured_joint_limits == rg.enforce_measured_joint_limits &&
+        cg.max_tilt_radians == rg.max_tilt_radians && cg.min_base_height == rg.min_base_height &&
+        cg.state_timeout == rg.state_timeout && cg.input_timeout == rg.input_timeout &&
+        cg.source_loss == rg.source_loss && checked.mode.alignment_seconds == real.mode.alignment_seconds &&
+        checked.mode.damping_seconds == real.mode.damping_seconds &&
+        checked.mode.authority_timeout == real.mode.authority_timeout &&
+        checked.mode.policy_timeout == real.mode.policy_timeout,
+        "Real-checks simulation copies every real guard and timing");
+  for (const auto& [state, expected] : real.mode.states) {
+    const auto& actual = checked.mode.states.at(state);
+    check(actual.outputs.ros_state == expected.outputs.ros_state &&
+          actual.outputs.lowcmd == expected.outputs.lowcmd && actual.command == expected.command &&
+          actual.model == expected.model && actual.on_enter == expected.on_enter && actual.on_exit == expected.on_exit &&
+          actual.preparing_fallback.has_value() == expected.preparing_fallback.has_value(),
+          "Real-checks simulation copies each real state and actions");
+    if (expected.preparing_fallback)
+      check(actual.preparing_fallback->from_hold == expected.preparing_fallback->from_hold &&
+            actual.preparing_fallback->otherwise == expected.preparing_fallback->otherwise,
+            "Real-checks simulation copies preparing fallback");
+  }
+  const auto same_routes = [](const auto& a, const auto& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+      if (a[i].from != b[i].from || a[i].to != b[i].to || a[i].via != b[i].via || a[i].event != b[i].event)
+        return false;
+    return true;
+  };
+  check(same_routes(checked.mode.manual_transitions, real.mode.manual_transitions) &&
+        same_routes(checked.mode.automatic_transitions, real.mode.automatic_transitions) &&
+        same_routes(checked.mode.system_transitions, real.mode.system_transitions),
+        "Real-checks simulation copies all real transition routes");
+  StateMachine checked_machine(checked.mode);
+  check(checked_machine.dispatch({Event::manual(State::AsapLoco)}).decision == Decision::Rejected,
+        "Real-checks simulation cannot skip directly to loco");
+  const auto checked_align = checked_machine.dispatch({Event::manual(State::Align)});
+  check(checked_align.decision == Decision::Accepted && has(checked_align, Action::AcquireAuthority),
+        "Real-checks simulation requires the real alignment authority action");
+  const auto checked_loss = checked_machine.dispatch({Event::system(EventKind::SourceLost)});
+  check(checked_loss.after.state == State::Align && has(checked_loss, Action::ZeroMotion),
+        "Real-checks simulation retains alignment and zeros motion on source loss");
+  error([&] { load_configuration(RuntimeMode::Real, checked_options); }, "simulation mode");
+  auto custom_real = YAML::LoadFile((second / "share/anakin_env/config/real.yaml").string());
+  custom_real["guards"]["max_tilt_radians"] = .8;
+  const auto custom_real_path = temp.path / "custom-real.yaml";
+  write(custom_real_path, YAML::Dump(custom_real));
+  checked_options.real_config = custom_real_path;
+  check(load_configuration(RuntimeMode::Sim, checked_options).mode.guards.max_tilt_radians == .8,
+        "Explicit real rules file is used");
+  checked_options.real_checks = false;
+  error([&] { load_configuration(RuntimeMode::Sim, checked_options); }, "requires --real-checks");
+  checked_options.real_checks = true;
+  const auto unsafe_sim_path = temp.path / "unsafe-sim.yaml";
+  auto unsafe_sim = YAML::LoadFile((second / "share/anakin_env/config/sim.yaml").string());
+  checked_options.config = unsafe_sim_path;
+  unsafe_sim["transport"]["interface"] = "eth0";
+  write(unsafe_sim_path, YAML::Dump(unsafe_sim));
+  error([&] { load_configuration(RuntimeMode::Sim, checked_options); }, "simulation lo");
+  unsafe_sim["transport"]["interface"] = "lo";
+  unsafe_sim["transport"]["sdk_domain"] = 0;
+  write(unsafe_sim_path, YAML::Dump(unsafe_sim));
+  error([&] { load_configuration(RuntimeMode::Sim, checked_options); }, "simulation lo");
   options.install_prefix = first;
   error([&] { load_configuration(RuntimeMode::Sim, options); }, "install_prefix");
   options.install_prefix = second;
@@ -456,7 +527,7 @@ void resource_contracts(const fs::path& configs) {
   error([&] { load_configuration(RuntimeMode::Sim, options); }, "mode");
   options.config.reset();
   fixture = YAML::LoadFile(options.input_config->string());
-  fixture["enabled_sources"] = YAML::Load("[keyboard]");
+  fixture["enabled_sources"] = YAML::Load("[web]");
   write(*options.input_config, YAML::Dump(fixture));
   error([&] { load_configuration(RuntimeMode::Sim, options); }, "primary");
   options.primary_input.reset();

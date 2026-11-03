@@ -6,11 +6,14 @@ import os
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from anyio import CancelScope
 
 from .protocol import Client, VERSION, event, subscriptions
+from .control import control_request
 
 log = logging.getLogger("telemetry")
 
@@ -47,11 +50,16 @@ def create_app(adapter=None):
             "ready": app.state.adapter is not None,
             "error": app.state.error,
             "domain_id": os.getenv("ROS_DOMAIN_ID", "0"),
-            "read_only": True,
+            "read_only": False,
+            "control_protocol": 1,
         }
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket):
+        origin = ws.headers.get("origin")
+        if origin and (urlsplit(origin).scheme not in ("http", "https") or urlsplit(origin).netloc != ws.headers.get("host")):
+            await ws.close(code=1008)
+            return
         await ws.accept()
         adapter = app.state.adapter
         if adapter is None:
@@ -69,7 +77,8 @@ def create_app(adapter=None):
             event(
                 "hello",
                 adapter="ros2",
-                read_only=True,
+                read_only=False,
+                control_protocol=1,
                 domain_id=os.getenv("ROS_DOMAIN_ID", "0"),
             )
         )
@@ -83,10 +92,15 @@ def create_app(adapter=None):
             while True:
                 packet = await ws.receive_json()
                 try:
-                    if not isinstance(packet, dict) or packet.get("v") != VERSION:
+                    if not isinstance(packet, dict) or type(packet.get("v")) is not int or packet.get("v") != VERSION:
                         raise ValueError("Expected protocol version 1")
                     kind = packet.get("kind")
-                    if kind == "subscribe":
+                    if kind == "control":
+                        if not hasattr(adapter, "control"):
+                            raise ValueError("Web control is unavailable")
+                        state = await asyncio.to_thread(adapter.control, client, control_request(packet))
+                        await send(event("control_state", **state))
+                    elif kind == "subscribe":
                         requests = subscriptions(packet.get("subscriptions"))
                         await asyncio.to_thread(adapter.configure, client, requests)
                         await send(event("subscribed", subscriptions=requests))
@@ -109,7 +123,7 @@ def create_app(adapter=None):
                         await asyncio.to_thread(adapter.detach, client)
                     else:
                         raise ValueError(
-                            "Unsupported operation. This gateway is read-only."
+                            "General ROS operations remain read-only; use explicit leased web control."
                         )
                 except (
                     ValueError,
@@ -119,7 +133,7 @@ def create_app(adapter=None):
                     RuntimeError,
                 ) as exc:
                     await send(
-                        event("error", code="REQUEST_REJECTED", message=str(exc))
+                        event("error", code="CONTROL_REJECTED" if isinstance(packet, dict) and packet.get("kind") == "control" else "REQUEST_REJECTED", message=str(exc))
                     )
 
         async def stream():
@@ -149,7 +163,7 @@ def create_app(adapter=None):
                             message="Waiting for subscribed data"
                             if awaiting
                             else (
-                                "Stream stale" if stale else "Read-only ROS2 gateway"
+                                "Stream stale" if stale else "ROS2 telemetry gateway"
                             ),
                         )
                     )
@@ -159,10 +173,26 @@ def create_app(adapter=None):
                     await send(packet)
                 await asyncio.sleep(1 / 30)
 
-        receiver, sender = asyncio.create_task(receive()), asyncio.create_task(stream())
+        async def configuration():
+            while True:
+                await send(event("input_config", **await asyncio.to_thread(adapter.input_config)))
+                await asyncio.sleep(1)
+
+        async def control_state():
+            while True:
+                if hasattr(adapter, "control_status"):
+                    await send(event("control_state", **await asyncio.to_thread(adapter.control_status, client)))
+                await asyncio.sleep(0.1)
+
+        receiver, sender, config_sender, control_sender = (
+            asyncio.create_task(receive()),
+            asyncio.create_task(stream()),
+            asyncio.create_task(configuration()),
+            asyncio.create_task(control_state()),
+        )
         try:
             done, pending = await asyncio.wait(
-                [receiver, sender], return_when=asyncio.FIRST_COMPLETED
+                [receiver, sender, config_sender, control_sender], return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
                 task.result()
@@ -171,12 +201,19 @@ def create_app(adapter=None):
         except Exception as exc:
             log.warning("Client disconnected: %s", exc)
         finally:
-            for task in (receiver, sender):
-                task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await task
-            with suppress(Exception):
-                await asyncio.to_thread(adapter.detach, client)
+            # ASGI can cancel the handler while its socket is closing. Releasing
+            # the lease must finish even when the surrounding request is cancelled.
+            with CancelScope(shield=True):
+                for task in (receiver, sender, config_sender, control_sender):
+                    task.cancel()
+                with suppress(Exception):
+                    if hasattr(adapter, "release_control"):
+                        await asyncio.to_thread(adapter.release_control, client)
+                with suppress(Exception):
+                    await asyncio.to_thread(adapter.detach, client)
+                for task in (receiver, sender, config_sender, control_sender):
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
 
     dist = Path(__file__).resolve().parents[1] / "dist"
     if dist.exists():

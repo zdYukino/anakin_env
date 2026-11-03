@@ -41,20 +41,24 @@ class RuntimeController {
   uint64_t state_sequence() const { return state_seq_; }
   const std::string& diagnostic() const { return diagnostic_; }
   void feedback(const NativeSample& sample);
+  void malformed_transport_packet();
   void feedback_fault(const std::string& reason);
   void status(const RuntimeStatus& status);
   bool target(const Target& target);
   void request_result(const Uuid& request, bool accepted);
   ActionPlan tick(const InputFrame& input);
+  bool action_available(InputAction action, const InputSnapshot& input) const;
   std::optional<Frame> take_frame(const InputSnapshot& input);
   void shutdown();
  private:
   bool fresh(Clock::time_point now) const;
   bool actual_valid() const;
   bool measured_valid() const;
+  bool input_fresh(const InputSnapshot&) const;
   bool permitted_input(const InputSnapshot&) const;
+  bool manual_entry_allowed(const Event& event, const InputSnapshot& input) const;
   void execute(const ActionPlan& plan);
-  void revoke();
+  void revoke(bool preserve_handover = false);
   void release_command();
   void start_policy();
   bool send(bool release = false);
@@ -72,6 +76,10 @@ class RuntimeController {
   NativeStatusRouter router_{session_};
   std::optional<NativeSample> feedback_;
   std::optional<Target> target_;
+  // The handover may reuse only a successfully written target and its original
+  // deadline; it is never admitted as a target of the new transaction.
+  std::optional<Target> last_written_target_, handover_target_;
+  Clock::time_point last_written_deadline_{}, handover_deadline_{};
   std::optional<RuntimeRequest> request_;
   std::optional<RuntimeStatus> status_;
   std::optional<uint64_t> acquisition_;
@@ -88,6 +96,8 @@ class RuntimeController {
   bool authority_ready_ = false, wrote_ = false, need_policy_ = false, request_accepted_ = false;
   bool pending_fault_ = false, rollback_fault_ = false, stopped_ = false;
   bool alignment_pending_ = false, feedback_was_fresh_ = false;
+  // A completed mimic must not resume a velocity command held before the return.
+  bool return_motion_inhibited_ = false, return_neutral_seen_ = false;
   std::string diagnostic_;
 };
 }  // namespace anakin::env

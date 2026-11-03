@@ -17,12 +17,15 @@ ANAKIN_SDK_PREFIX=/path/to/sdk/install/anakin_sdk ./build.sh
 ```sh
 ./em_run.sh                         # 默认 real：只启动原生 Env
 ./em_run.sh --real --input remote   # 实机；先配置明确的机器人网卡
-./em_run.sh --sim --input keyboard  # 显式仿真；MC、官方模拟器分别启动
+./em_run.sh --sim --input auto  # 显式仿真；MC、官方模拟器分别启动
+./em_run.sh --sim --real-checks # 回环仿真使用 real 状态机与守卫
 ```
 
-完整操作步骤、端点、配置覆盖、键位、状态/输出表和用户验收边界见[独立运行说明](docs/standalone-operation.md)。旧 `--loopback-sim` 已移除并明确拒绝。正常入口不启动 MC、模拟器或测试夹具，不自动 reset；MC/Env 持续等待所需的新数据。
+完整操作步骤、端点、配置覆盖、网页控制、状态/输出表和用户验收边界见[独立运行说明](docs/standalone-operation.md)。旧 `--loopback-sim` 已移除并明确拒绝。正常入口不启动 MC、模拟器或测试夹具，不自动 reset；MC/Env 持续等待所需的新数据。
 
 启动脚本使用本仓库的独立安装目录。可通过 `ANAKIN_PREFIX` 指定安装目录，通过 `ANAKIN_SDK_PREFIX` 指定 SDK。启动前检查选定 ELF、本地包标记、安装 YAML 和 SDK 构建记录；配置与该 ELF 的前缀一致。ROS 默认 domain 87，仅在本机发现节点；仿真 SDK 为 `lo` / domain 31，实机使用配置中的显式网卡 / domain 0。脚本直接运行 C++ 二进制文件；ROS 日志默认进入本仓 `log/ros/`。
+
+`--sim --real-checks` 从安装的 `real.yaml` 加载实机状态机、守卫和时序，同时保留 `sim.yaml` 的回环传输；可用 `--real-config PATH` 指定另一份 real 规则。权限获取使用实机的异步流程和仿真服务替身，不访问机器人权限服务，因而不能验证真实硬件权限 RPC。
 
 [AnakinC](https://github.com/zdYukino/AnakinC) 负责固定三个子仓版本及一键初始化、构建和 ENV + MC 联合启动。父仓入口默认 sim；本仓入口仍默认 real。可用 `ROS_PREFIX`、`UNITREE_SDK2_PREFIX` 指定依赖安装前缀。
 
@@ -33,7 +36,7 @@ Env 使用一个 YAML 状态引擎、共用输入映射和共同 SDK PD 编码�
 ```mermaid
 flowchart LR
     Launch[em_run.sh 默认 real / 显式 sim] --> Native[原生 Env]
-    Inputs[键盘 / SDL / Unitree 共用映射] --> Native
+    Inputs[网页 / SDL / Unitree 自动仲裁] --> Native
     Config[选定安装内 YAML] --> Native
     Native <-->|ROS 状态 / 事务 / 目标| MC[独立 MC]
     Native <-->|HG LowState / LowCmd| Backend[官方模拟器或 G1]

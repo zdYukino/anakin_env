@@ -78,3 +78,35 @@ Vitest压力输入为12通道、500Hz、70秒，验证最后60秒保留、时间
 本轮类型检查、22项前端测试、格式检查、生产构建通过；6项Python协议/启动检查通过。启动脚本从/tmp通过绝对路径运行，验证无Python/ROS的--web、ROS2独立195域的同源Web及read_only=true健康接口、当前SDK消息环境探测、缓存构建不重写产物、非法参数和服务进程退出。测试进程已清理。
 
 Node依赖范围按当前jsdom引擎收紧为^22.22.2 / ^24.15.0 / >=26，未变更锁定包版本。完整依赖见docs/dependencies.md。浏览器视觉/GPU验证限制仍与上文相同。
+
+## 追加：遥控器状态与生效 YAML
+
+2026-11-03，Controllers 替代重复的 Robotics 页面；工作台移除 robot 面板并迁移旧布局。新增独立输入诊断流，侧栏通过发布节点的只读参数读取生效 YAML（含 CLI 主输入覆盖），不回退默认文件。遥测在 ROS 低频定时器发布，避免把序列化加入 500 Hz 控制线程；参数读取也与 WebSocket 实时批流分开。
+
+验证：前端 28 项测试、Gateway 4 项协议测试、env 22 项 offline CTest、类型检查和生产构建通过。SDL 测试在沙箱内异常、TestClient 在线程启动处阻塞；同一组测试在本机运行全部通过。
+
+`scripts/verify_inputs.py` 在独立 ROS 196 / DDS 43 loopback 域启动实际 native env 和只读 Gateway，无机器人反馈、无 MC/控制发布。最终接收 30 个双源状态快照，实测 29.41 Hz；核验自定义 R1+Start 松开映射、数字键字符串、`--input remote` 覆盖文件中的 keyboard，以及磁盘 YAML 后续修改不会冒充运行配置。测试进程自动清理。
+
+本轮使用 Edge 完成中文 1366×768 遥控器/工作台视觉检查及约 390×844 窄屏侧栏检查；工作台无机器人面板，两路状态与运行配置组合键均可见。这补充了上述早期记录中的浏览器不可用限制；未据此声称物理手柄/遥控器接入或 GPU 帧率已验收。
+
+## 追加：Xbox 映射与底部事件条
+
+检测到实机 Xbox Series X Controller，蓝牙 GUID `050000005e040000130b000009050000`。旧 SDL 通用映射将右摇杆与扳机混淆，部分面键/肩键序号也不符。修正配置保存在 `inputs.yaml` 的 `gamepad.mappings`，仅匹配此 GUID；正式适配器只读采样确认右摇杆回到正常中位，LT/RT 分别为0。完整四轴、独立 LT/RT、LB/RB 及 X 的映射使用 SDL 虚拟设备回归；没有将中位采样当作全部实体按键/行程验收。
+
+前端29项测试和 env 23项 offline CTest通过；新增事件测试覆盖输入来源、异步进行中/确认成功/故障失败、非主输入急停归因、按住不刷屏和有界序号。`verify_inputs.py --events --gamepad` 用独立 ROS198/DDS46 的无机器人反馈 native env、PTY 和实际只读 Xbox 验证 Gateway WebSocket；实测29.41Hz，核验键盘发起的 disarmed成功、asap_loco进行中、hold拒绝、damping成功及被中断请求取消。没有 MC/机器人控制发布者或模拟器。
+
+浏览器核验中文1366×768遥控器面板、真实 Xbox 四轴/模拟扳机、侧栏运行映射、底部“键盘→保持站姿·失败”，点击底部条可见完整来源/目标/结果和原因；390×844下结果仍在右侧显示。独立预览意外终止时发现两个测试子进程残留，已按具体 PID 清理；验证脚本增加 SIGTERM 清理和启动前端口占用检查，避免复用已有服务。
+
+
+## 网页控制与自动仲裁验收（2026-11-03，最终版本）
+
+本次已获用户明确批准：跨 ENV/网关/前端/启动器移除终端键盘，改为 Unitree、实体 Joy、网页自动仲裁。保留任务开始前所有未提交工作；未自动提交混合工作区。
+
+- ENV 独立构建安装完成，C++ offline 24/24 通过，包含三路仲裁、非主来源急停、失联/重连/回放、网页租约及实机入口动作可用性。SDL 虚拟设备测试在默认沙箱中受设备访问限制崩溃，使用同一产物在沙箱外完成整套 24/24；没有 ROS/机器人动作。
+- Vitest 34/34，包含网页显式激活、旧 periodic status 与激活确认交错、心跳超时、数据源/历史切换释放、虚拟 Joy 按键/肩键/摇杆回中、灰色指令及关闭面板恢复。TypeScript strict 与 Vite 生产构建通过。
+- Python 网关/控制/启动器 24/24；普通 ROS 写入拒绝、同源 Origin、独占租约、过期、乱序、重复激活、ASGI 取消中的断连释放均覆盖。TestClient 依赖本机 asyncio socket，沙箱外运行。上游 Starlette TestClient 弃用提示仍存在。
+- 父仓 tests/orchestration.py 通过：自动模式无 TTY 启动、keyboard 参数拒绝、domain/参数传递、退出与信号清理。
+- 最终真实链路：scripts/verify_inputs.py --events，独立 ROS domain 196、SDK domain 43、网卡 lo；所有测试状态关闭 LowCmd 输出并配置撤权动作。收到 37 个输入快照，29.41 Hz，sdk_publish_count=0。已确认 web 来源 disarmed 成功、asap_loco Preparing 进行中、急停 damping 成功；被 YAML 移除的 Hold 动作由 ENV 报不可用且网关拒绝；修改磁盘文件没有改变已加载配置。
+- Edge 中文实际页面（1474×748）核验网页开关、02 指令面板、亮/灰状态、可独立悬浮的虚拟 Joy。虚拟 Up 将期望高度 0.78 改为 0.83，RB/R1+Up 通过共用映射产生 ASAP CR7 Preparing 事件。最终构建再次验证 Hold disabled、虚拟 Joy 可见；关闭网页控制后关节窗口恢复且浮层消失。WebGL 模型正常显示；未测最坏情况 GPU 帧率和实机动作。
+
+正常 domain 87／端口 8765 的原会话未重启或发送验证输入。需要重启 ENV 和 UI Gateway 才能加载本次接口；旧版 Gateway 不具备控制协议时按钮保持不可用。

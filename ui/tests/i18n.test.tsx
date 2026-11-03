@@ -46,7 +46,11 @@ it('switches all main views from Settings without reconnecting or clearing numer
   fireEvent.click(screen.getByRole('button', { name: '工作台' }));
   fireEvent.click(screen.getByRole('button', { name: '工作台' }));
   expect(screen.getByText('/anakin/state')).toBeTruthy();
-  expect(screen.getByRole('button', { name: '移除机器人状态' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '移除关节遥测' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '移除机器人状态' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '遥控器状态' }));
+  expect(screen.getByRole('heading', { name: '遥控器状态' })).toBeTruthy();
+  expect(screen.getByRole('complementary', { name: '状态切换方式' })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '系统诊断' }));
   expect(screen.getByText('事件日志')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '设置' }));

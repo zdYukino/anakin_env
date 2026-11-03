@@ -121,8 +121,11 @@ def main():
         require(argv[1:] == forwards, "Forward exact options, paths with spaces and ROS args")
         argv, _ = run(entry, ["--real", "--input", "gamepad"])
         require(argv[1:] == ["--real", "--input", "gamepad"], "Explicit real input")
-        argv, _ = run(entry, ["--input", "keyboard"])
-        require(argv[1:] == ["--real", "--input", "keyboard"], "Default real input forwarding")
+        checked = ["--sim", "--real-checks", "--real-config", str(root / "real rules.yaml")]
+        argv, _ = run(entry, checked)
+        require(argv[1:] == checked, "Forward real-checks simulation and its real rules path")
+        argv, _ = run(entry, ["--input", "auto"])
+        require(argv[1:] == ["--real", "--input", "auto"], "Default real input forwarding")
         argv, _ = run(entry, ["--sim"], {"ANAKIN_PREFIX": str(explicit), "ANAKIN_SDK_PREFIX": str(sdk)})
         require(argv[0] == str(explicit / "lib/anakin_env/anakin_env_native_node"), "Explicit selected prefix")
         if args.workspace_entry:
@@ -135,7 +138,8 @@ def main():
         require(argv[0] == str(shared / "lib/anakin_env/anakin_env_native_node"), "Shared installation requires an explicit prefix")
         moved.rename(standalone)
         for arguments in (["--loopback-sim"], ["--sim", "--real"], ["--real", "--real"], ["--sim", "--sim"],
-                          ["--input"], ["--input", "unknown"], ["--config"], ["--input-config"], ["--unknown"],
+                          ["--real-checks"], ["--real", "--real-checks"], ["--sim", "--real-config", "x"],
+                          ["--input"], ["--input", "unknown"], ["--input", "keyboard"], ["--config"], ["--input-config"], ["--unknown"],
                           ["--input", "remote", "--input", "keyboard"], ["-p", "duration:=1"], [""]):
             run(entry, arguments, error=True)
         run(entry, overrides={"ANAKIN_PREFIX": str(root / "missing"), "AMENT_PREFIX_PATH": str(shared)}, error=True)

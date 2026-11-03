@@ -104,7 +104,7 @@ class LauncherTest(unittest.TestCase):
             ) as response:
                 health = json.load(response)
             self.assertTrue(health["ready"], health)
-            self.assertTrue(health["read_only"])
+            self.assertFalse(health["read_only"])
             self.assertEqual(health["domain_id"], "195")
             self.assertEqual(health["adapter"], "ros2")
 
