@@ -1,7 +1,7 @@
 
 #include <dlfcn.h>
 
-#include <anakin_env/actuation_limits.hpp>
+#include "sim_contract.hpp"
 #include <anakin_env/transport.hpp>
 #include <anakin_sdk/msg/control_target.hpp>
 #include <anakin_sdk/msg/inference_status.hpp>
@@ -37,11 +37,16 @@ class Probe final : public rclcpp::Node {
   Probe() : rclcpp::Node("anakin_sim_probe") {
     domain_ = declare_parameter<int>("sdk_domain", 31);
     alignment_seconds_ = declare_parameter<double>("alignment_seconds", 2.);
+    duration_ = declare_parameter<double>("duration", 20.);
+    reset_at_start_ = declare_parameter<bool>("reset_at_start", false);
+    if (!std::isfinite(duration_) || duration_ <= 0 || duration_ > 3600)
+      throw std::runtime_error("Explicit probe duration must be finite and positive");
     simulator_pid_ = declare_parameter<int>("simulator_pid", 0);
     suspended_ = declare_parameter<bool>("suspended", false);
     demo_ = declare_parameter<bool>("demo_switch", false);
     rc_loss_ = declare_parameter<bool>("rc_loss", false);
     result_ = declare_parameter<std::string>("result_json", "");
+    if (result_.empty()) throw std::runtime_error("Explicit probe requires result_json");
     require_loopback("lo", domain_);
     unitree::robot::ChannelFactory::Instance()->Init(domain_, "lo");
     remote_ = std::make_unique<unitree::robot::ChannelPublisher<Wireless>>("rt/wirelesscontroller");
@@ -52,56 +57,16 @@ class Probe final : public rclcpp::Node {
           const auto& command = *static_cast<const LowCommand*>(data);
           std::lock_guard<std::mutex> lock(mutex_);
           ++observed_commands_;
-          if (command.crc() != command_crc(command) || command.mode_machine() != 5 ||
-              command.mode_pr() != 0)
-            ++bad_commands_;
-          bool damping = true;
-          for (size_t i = 0; i < 29; ++i) {
-            const auto& motor = command.motor_cmd()[i];
-            if (!std::isfinite(motor.q()) || !std::isfinite(motor.kp()) ||
-                !std::isfinite(motor.kd()))
-              ++bad_commands_;
-            damping = damping && motor.kp() == 0 && motor.kd() > 0 && motor.tau() == 0;
-          }
-          if (damping)
-            ++observed_damping_;
-          else {
-            ++observed_position_;
-            if (fault_seen_ != Clock::time_point{} && Clock::now() - fault_seen_ > 20ms)
-              ++late_position_after_fault_;
-            for (auto it = targets_.rbegin(); it != targets_.rend(); ++it) {
-              bool matches = known_execution_contract(it->execution_profile, it->command_semantics,
-                                                      it->gain_profile);
-              if (!matches) continue;
-              const auto mode = execution_encoding(it->execution_profile, it->command_semantics);
-              const auto& gains = simulation_gains(it->gain_profile, it->model_id);
-              const auto lower = reference_lower_limits(), upper = reference_upper_limits();
-              for (size_t i = 0; i < 29; ++i) {
-                const double mux = it->target.points[0].positions[i];
-                float expected_q = static_cast<float>(mux), expected_tau = 0;
-                if (mode != ExecutionEncoding::StrictPosition) {
-                  expected_q = static_cast<float>(std::clamp(mux, lower[i], upper[i]));
-                  if (expected_q < lower[i])
-                    expected_q = std::nextafter(expected_q, std::numeric_limits<float>::infinity());
-                  if (expected_q > upper[i])
-                    expected_q =
-                        std::nextafter(expected_q, -std::numeric_limits<float>::infinity());
-                  if (mode == ExecutionEncoding::EquivalentReference)
-                    expected_tau = static_cast<float>(
-                        static_cast<double>(static_cast<float>(gains.kp[i])) *
-                        (static_cast<double>(static_cast<float>(mux)) - expected_q));
-                }
-                const auto& motor = command.motor_cmd()[i];
-                matches = matches && std::abs(motor.q() - expected_q) < 1e-6f &&
-                          std::abs(motor.tau() - expected_tau) < 1e-6f &&
-                          motor.kp() == static_cast<float>(gains.kp[i]) &&
-                          motor.kd() == static_cast<float>(gains.kd[i]);
+          switch (sim_test::classify(command)) {
+            case sim_test::CommandKind::Invalid: ++bad_commands_; break;
+            case sim_test::CommandKind::Release: ++observed_release_; break;
+            case sim_test::CommandKind::Damping: ++observed_damping_; break;
+            case sim_test::CommandKind::Position:
+              ++observed_position_;
+              for (auto it = targets_.rbegin(); it != targets_.rend(); ++it) {
+                if (sim_test::matches_target(command, *it)) { ++matched_targets_; break; }
               }
-              if (matches) {
-                ++matched_targets_;
-                break;
-              }
-            }
+              break;
           }
         },
         1);
@@ -141,29 +106,18 @@ class Probe final : public rclcpp::Node {
     uint16_t pulse_keys = 0;
     enum class Stage { Baseline, Reset, Align, Hold, Run };
     Stage stage = Stage::Baseline;
-    bool reset_sent = false, loss_sent = false, expected_fault = false;
+    bool reset_sent = false, loss_sent = false, movement_requested = false, movement_seen = false;
     uint32_t before_reset = 0;
     Clock::time_point first_active{}, stage_started = started;
+    Frame before_loss;
     std::string failure;
     while (!stopping && rclcpp::ok()) {
       rclcpp::spin_some(shared_from_this());
       const auto now = Clock::now();
       const double elapsed = std::chrono::duration<double>(now - started).count();
-      if (elapsed > 35) {
-        failure = "probe deadline";
-        break;
-      }
+      if (elapsed >= duration_) break;  // Test-owned completion; Env remains persistent.
       if (frame_ && frame_->execution_mode == Frame::MODE_FAULT) {
-        if (rc_loss_ && loss_sent && !frame_->diagnostics.status.empty() &&
-            frame_->diagnostics.status[0].message.find("Remote age exceeded 250 ms") !=
-                std::string::npos) {
-          expected_fault = true;
-          std::lock_guard<std::mutex> lock(mutex_);
-          fault_seen_ = Clock::now();
-          loss_to_fault_ms_ =
-              std::chrono::duration<double, std::milli>(fault_seen_ - loss_started_).count();
-        } else
-          failure = "native execution fault";
+        failure = "native execution fault";
         break;
       }
       if (stage == Stage::Baseline && frame_ && frames_ >= 20 && elapsed > .3) {
@@ -176,25 +130,29 @@ class Probe final : public rclcpp::Node {
         }
         zero_before_authorization_ = true;
         {
-          if (frame_->sdk_tick < 300) {
+          if (reset_at_start_ && frame_->sdk_tick < 300) {
             next += 20ms;
             std::this_thread::sleep_until(next);
             continue;
           }
-          if (!reset_sent) {
+          if (reset_at_start_ && !reset_sent) {
             before_reset = frame_->sdk_tick;
             reset_own_simulator();
             reset_sent = true;
             stage = Stage::Reset;
-            stage_started = now;
+          } else {
+            pulse_keys = sim_test::align_keys;
+            pulse_until = now + 100ms;
+            stage = Stage::Align;
           }
+          stage_started = now;
         }
       } else if (stage == Stage::Reset && frame_) {
         const auto& q = frame_->imu.orientation;
         if (frame_->sdk_tick < before_reset && frame_->sdk_tick < 150 &&
             q.x * q.x + q.y * q.y < .02) {
           reset_confirmed_ = true;
-          pulse_keys = 3u | (1u << 10);
+          pulse_keys = sim_test::align_keys;
           pulse_until = now + 100ms;
           stage = Stage::Align;
           stage_started = now;
@@ -205,16 +163,11 @@ class Probe final : public rclcpp::Node {
       } else if (stage == Stage::Align && frame_ && frame_->execution_mode == Frame::MODE_HOLD) {
         stage = Stage::Hold;
         stage_started = now;
-      } else if (stage == Stage::Hold && now - stage_started > 100ms && !loss_sent) {
-        if (rc_loss_) {
-          loss_sent = true;
-          loss_started_ = now;
-        } else {
-          pulse_keys = 3u | (1u << 10);
-          pulse_until = now + 100ms;
-          stage = Stage::Run;
-          stage_started = now;
-        }
+      } else if (stage == Stage::Hold && now - stage_started > 100ms) {
+        pulse_keys = sim_test::loco_keys;  // Exact R1+Down, shared with SDL/remote map.
+        pulse_until = now + 100ms;
+        stage = Stage::Run;
+        stage_started = now;
       }
       if (frame_ && frame_->execution_mode == Frame::MODE_ACTIVE &&
           (frame_->sdk_published_phase_mask & 4)) {
@@ -224,18 +177,26 @@ class Probe final : public rclcpp::Node {
                     << std::endl;
         }
         if (demo_ && !mimic_requested_ && now - first_active > 1s) {
-          pulse_keys = 1u | (1u << 12);
+          pulse_keys = sim_test::cr7_keys;
           pulse_until = now + 100ms;
           mimic_requested_ = true;
         }
-        if (rc_loss_ && !loss_sent && now - first_active > 1s) {
+        if (rc_loss_ && !movement_requested && now - first_active > 300ms) {
+          pulse_keys = 0x8000;  // No shoulders + Left: motion toggle.
+          pulse_until = now + 100ms;
+          movement_requested = true;
+        }
+        if (rc_loss_ && frame_->command.twist.linear.x > 0) movement_seen = true;
+        if (rc_loss_ && movement_seen && !loss_sent && now - first_active > 1s) {
           loss_sent = true;
           loss_started_ = now;
+          before_loss = *frame_;
         }
       }
       if (!loss_sent) {
         Wireless remote;
         remote.keys() = now < pulse_until ? pulse_keys : 0;
+        if (rc_loss_) remote.ly() = .2f;
         if (!remote_->Write(remote, 0)) {
           failure = "RC simulation publication rejected";
           break;
@@ -250,30 +211,25 @@ class Probe final : public rclcpp::Node {
         failure = "no actual active SDK publication";
         break;
       }
-      if (loss_sent && now - loss_started_ > 1s) {
-        failure = "RC loss did not stop within bound";
-        break;
+      if (loss_sent && now - loss_started_ > 500ms) {
+        if (!frame_ || !sim_test::loss_kept_policy(before_loss, *frame_)) {
+          failure = "default sim RC loss did not zero movement and retain policy/transaction";
+          break;
+        }
+        loss_zero_retained_ = true;
       }
       next += 20ms;
       if (next < now) next = now + 20ms;
       std::this_thread::sleep_until(next);
     }
-    if (expected_fault) {
-      const auto end = Clock::now() + 150ms;
-      while (Clock::now() < end) {
-        rclcpp::spin_some(shared_from_this());
-        std::this_thread::sleep_for(5ms);
-      }
-    }
     std::lock_guard<std::mutex> lock(mutex_);
     const bool policy_pass = matched_targets_ > 20 &&
                              sdk_active_epochs_.size() >= (demo_ ? 3u : 1u) &&
                              mc_ack_epochs_.size() >= (demo_ ? 3u : 1u);
-    const bool pass = failure.empty() && zero_before_authorization_ && observed_commands_ > 100 &&
-                      bad_commands_ == 0 &&
-                      (rc_loss_ ? (expected_fault && observed_damping_ > 0 &&
-                                   late_position_after_fault_ == 0 && loss_to_fault_ms_ < 350.)
-                                : policy_pass);
+    const bool pass = !stopping && failure.empty() && zero_before_authorization_ &&
+                      (!reset_at_start_ || reset_confirmed_) && observed_commands_ > 100 &&
+                      bad_commands_ == 0 && policy_pass &&
+                      (!rc_loss_ || (loss_sent && movement_seen && loss_zero_retained_));
     std::ofstream out(result_);
     out << std::boolalpha << "{\n  \"success\": " << pass << ",\n  \"suspended\": " << suspended_
         << ",\n  \"zero_commands_before_authorization\": " << zero_before_authorization_
@@ -281,13 +237,12 @@ class Probe final : public rclcpp::Node {
         << ",\n  \"observed_native_commands\": " << observed_commands_
         << ",\n  \"observed_position_commands\": " << observed_position_
         << ",\n  \"observed_damping_commands\": " << observed_damping_
+        << ",\n  \"observed_release_commands\": " << observed_release_
         << ",\n  \"matched_canonical_targets\": " << matched_targets_
         << ",\n  \"bad_native_commands\": " << bad_commands_
         << ",\n  \"sdk_active_epochs\": " << sdk_active_epochs_.size()
         << ",\n  \"mc_sdk_ack_epochs\": " << mc_ack_epochs_.size()
-        << ",\n  \"expected_remote_loss_fault\": " << expected_fault
-        << ",\n  \"remote_loss_to_fault_ms\": " << loss_to_fault_ms_
-        << ",\n  \"position_commands_after_fault_bound\": " << late_position_after_fault_
+        << ",\n  \"remote_loss_zero_retained_policy\": " << loss_zero_retained_
         << ",\n  \"failure\": " << std::quoted(failure) << "\n}\n";
     std::cout << "PROBE_RESULT success=" << pass << " observed=" << observed_commands_
               << " matched=" << matched_targets_ << " sdk_epochs=" << sdk_active_epochs_.size()
@@ -331,15 +286,14 @@ class Probe final : public rclcpp::Node {
     XSync(display_, False);
   }
   int domain_ = 31, simulator_pid_ = 0;
-  double alignment_seconds_ = 2.;
+  double alignment_seconds_ = 2., duration_ = 20.;
   bool suspended_ = false, demo_ = false, rc_loss_ = false, zero_before_authorization_ = false,
-       reset_confirmed_ = false, mimic_requested_ = false;
+       reset_confirmed_ = false, mimic_requested_ = false, reset_at_start_ = false,
+       loss_zero_retained_ = false;
   uint64_t frames_ = 0, observed_commands_ = 0, observed_position_ = 0, observed_damping_ = 0,
-           matched_targets_ = 0, bad_commands_ = 0;
+           observed_release_ = 0, matched_targets_ = 0, bad_commands_ = 0;
   std::mutex mutex_;
-  Clock::time_point loss_started_{}, fault_seen_{};
-  uint64_t late_position_after_fault_ = 0;
-  double loss_to_fault_ms_ = 0.;
+  Clock::time_point loss_started_{};
   std::string result_;
   Frame::ConstSharedPtr frame_;
   std::deque<Target> targets_;

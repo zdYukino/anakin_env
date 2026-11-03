@@ -1,4 +1,5 @@
 #include <anakin_env/confirmation.hpp>
+#include <anakin_env/offline_fixture.hpp>
 #include <anakin_sdk/srv/switch_inference_mode.hpp>
 #include <cmath>
 #include <iostream>
@@ -14,7 +15,7 @@ class Node final : public rclcpp::Node {
       throw std::runtime_error("No official /clock verified; use_sim_time must be false");
     if (declare_parameter<std::string>("backend", "offline_fixture") != "offline_fixture")
       throw std::runtime_error(
-          "Native transport has not yet passed isolated official-simulator acceptance");
+          "This explicit fixture accepts only backend=offline_fixture; use en_run.sh for native Env");
     if (declare_parameter<bool>("arm", false))
       throw std::runtime_error("Offline checkpoint cannot arm or publish SDK commands");
     duration_ = declare_parameter<double>("duration", 8.);
@@ -46,7 +47,7 @@ class Node final : public rclcpp::Node {
     next_tick_ = started_ + 2ms;
     timer_ = create_wall_timer(2ms, [this] { tick(); });
     RCLCPP_INFO(get_logger(),
-                "OFFLINE_FIXTURE: no SDK channels, execution_authorized=false; session %s",
+                "OFFLINE_FIXTURE: no SDK channels or actuation; Preparing may permit inference; session %s",
                 uuid_string(session_).c_str());
   }
   bool success = false, completed = false;
@@ -105,13 +106,12 @@ class Node final : public rclcpp::Node {
     request_.source_state_seq = state_seq_ + 1;
     request_.schema_id = schema_id;
     request_.target_model = model;
-    request_.gain_profile = "g1_asap_sim_v1";
-    request_.execution_profile = strict_execution_profile;
-    request_.command_semantics = mechanical_position;
+    use_offline_execution_contract(request_);
     request_.transition_profile = "g1_named_upper_v1";
     request_.allow_source_continuation = true;
     request_.timeout.sec = 5;
-    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true);
+    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true,
+                request_.gain_profile, request_.execution_profile, request_.command_semantics);
     confirmation_.begin(session_, mc_instance_, request_.request_id, epoch_);
     health_.begin(Clock::now() + 5s);
     have_request_ = true;
@@ -197,7 +197,7 @@ class Node final : public rclcpp::Node {
     }
     Frame f;
     f.header.stamp = now();
-    f.header.frame_id = "offline_fixture_base";
+    f.header.frame_id = offline_fixture_frame_id;
     f.schema_version = schema_version;
     f.schema_id = schema_id;
     f.session_id = session_;
@@ -205,10 +205,10 @@ class Node final : public rclcpp::Node {
     f.epoch = epoch_;
     f.state_seq = ++state_seq_;
     f.validity = 7;
-    f.gain_profile = "g1_asap_sim_v1";
-    f.execution_profile = strict_execution_profile;
-    f.command_semantics = mechanical_position;
-    f.execution_authorized = false;
+    use_offline_execution_contract(f);
+    // Explicit file/ROS fixture grants inference, never a native writer authority.
+    f.execution_mode = Frame::MODE_PREPARING;
+    f.execution_authorized = have_request_ && !terminal_failure_ && !restart_latched_;
     f.joints.header = f.header;
     f.joints.name = joint_names();
     auto q = fixture_pose();
@@ -226,7 +226,7 @@ class Node final : public rclcpp::Node {
     diagnostic_msgs::msg::DiagnosticStatus d;
     d.name = "anakin_env/backend";
     d.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-    d.message = "OFFLINE_FIXTURE: no physics, no native transport, no actuation";
+    d.message = offline_fixture_diagnostic;
     f.diagnostics.header = f.header;
     f.diagnostics.status.push_back(d);
     gate_.state(f, t);

@@ -27,7 +27,8 @@ void validate_reference_budget(const ReferenceBudget& budget, bool native_runtim
 }
 void require_native_reference_budget(const std::string& execution, uint8_t semantics,
                                      const ReferenceBudget& budget) {
-  if (execution_encoding(execution, semantics) != ExecutionEncoding::StrictPosition)
+  const auto encoding = execution_encoding(execution, semantics);
+  if (encoding != ExecutionEncoding::StrictPosition && encoding != ExecutionEncoding::SdkPdReference)
     validate_reference_budget(budget, true);
 }
 ReferenceReport encode_reference(const Positions& qv, const Positions& q, const Positions& dq,
@@ -37,6 +38,8 @@ ReferenceReport encode_reference(const Positions& qv, const Positions& q, const 
   if (!known_execution_contract(execution, semantics, gain))
     throw std::runtime_error("Unknown execution contract");
   const auto mode = execution_encoding(execution, semantics);
+  if (mode == ExecutionEncoding::SdkPdReference)
+    throw std::invalid_argument("Use encode_policy_pd for the common SDK PD contract; this API owns legacy projections only");
   ReferenceReport report;
   report.mux_reference = qv;
   if (mode == ExecutionEncoding::StrictPosition) {

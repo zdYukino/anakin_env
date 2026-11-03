@@ -12,11 +12,14 @@ struct SendSnapshot {
        target_authorized = false;
   uint64_t authorization_generation = 0, feedback_generation = 0;
   Clock::time_point state_acquired{}, remote_acquired{}, target_deadline{}, damping_deadline{};
+  bool require_primary_input = true, release_allowed = false;
+  std::chrono::milliseconds state_timeout{40}, input_timeout{250};
 };
 struct SendRequest {
   bool damping = false, has_target = false;
   uint64_t authorization_generation = 0;
   Clock::time_point deadline = Clock::time_point::max();
+  bool release = false;
 };
 struct EncodedFeedback {
   uint64_t generation;
@@ -55,6 +58,7 @@ inline std::optional<SendStatus> send_admission(const SendRequest& request, cons
                                                 Clock::time_point now) {
   if (now >= request.deadline) return SendStatus::DeadlineExpired;
   if (s.authorization_generation != request.authorization_generation) return SendStatus::Revoked;
+  if (request.release) return s.release_allowed ? std::nullopt : std::optional<SendStatus>(SendStatus::Revoked);
   if (request.damping) {
     if (!s.position_authorized && (!s.damping_allowed || now >= s.damping_deadline))
       return SendStatus::DampingExpired;
@@ -63,10 +67,10 @@ inline std::optional<SendStatus> send_admission(const SendRequest& request, cons
   if (!s.position_authorized) return SendStatus::Revoked;
   if (!s.feedback_integrity_ok) return SendStatus::FeedbackInvalid;
   if (!s.state_available || now < s.state_acquired ||
-      now - s.state_acquired > std::chrono::milliseconds(40))
+      now - s.state_acquired > s.state_timeout)
     return SendStatus::StateStale;
-  if (!s.remote_valid || now < s.remote_acquired ||
-      now - s.remote_acquired > std::chrono::milliseconds(250))
+  if (s.require_primary_input && (!s.remote_valid || now < s.remote_acquired ||
+      now - s.remote_acquired > s.input_timeout))
     return SendStatus::RemoteStale;
   if (s.stop_requested) return SendStatus::RemoteStop;
   if (request.has_target && (!s.target_authorized || now >= s.target_deadline))
@@ -97,7 +101,7 @@ SendResult guarded_send(const SendRequest& request, Now&& now, Observe&& observe
   if (prepared.feedback) {
     const auto& used = *prepared.feedback;
     if (!after.state_available || t1 < used.acquired ||
-        t1 - used.acquired > std::chrono::milliseconds(40))
+        t1 - used.acquired > after.state_timeout)
       return {SendStatus::StateStale, SendPhase::AfterEncoding, t1, "Encoded feedback expired"};
     if (after.feedback_generation != used.generation || after.state_acquired != used.acquired)
       return {SendStatus::FeedbackChanged, SendPhase::AfterEncoding, t1,

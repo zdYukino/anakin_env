@@ -1,3 +1,5 @@
+> 历史记录：本文旧入口、参数和验收状态保留当时事实。当前运行请以[独立运行说明](standalone-operation.md)为准；正常入口默认 real，旧 `--loopback-sim` 已拒绝。
+
 > Later SDK v3/reference work and the disabled PD profiles are recorded in [pd-reference-checkpoint.md](pd-reference-checkpoint.md). This file preserves its earlier checkpoint.
 
 > Later review repairs and the still-open PD-reference P1 are recorded in [review-fixes-20261027.md](review-fixes-20261027.md). This file preserves the earlier checkpoint.

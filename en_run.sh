@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-ws=${ANAKIN_WS:-"$repo/../anakin_cpp_ws"}
-ws=$(cd -- "$ws" && pwd)
-sdk_prefix=${ANAKIN_SDK_PREFIX:-"$ws/install/anakin_sdk"}
-if [[ -d "$repo/install/anakin_env" ]]; then default_prefix="$repo/install/anakin_env"; else default_prefix="$ws/install/anakin_env"; fi
-prefix=${ANAKIN_PREFIX:-"$default_prefix"}
-read -r sdk_revision < "$repo/anakin_sdk.revision"
-grep -Fq -- "$sdk_revision" "$sdk_prefix/share/anakin_sdk/cmake/revision.cmake" || { echo 'SDK revision mismatch' >&2; exit 2; }
-node=anakin_env_node
-native=false
-if [[ ${1:-} == --loopback-sim ]]; then native=true; node=anakin_env_native_node; shift; fi
-binary="$prefix/lib/anakin_env/$node"
-[[ -x "$binary" ]] || { echo "Missing C++ binary: $binary" >&2; exit 2; }
-
-built_lock="$prefix/share/anakin_env/runtime-sdk.revision"
-[[ -f "$built_lock" ]] || { echo 'Binary SDK build provenance is missing; rebuild this prefix' >&2; exit 2; }
-read -r built_revision < "$built_lock"
-[[ "$built_revision" == "$sdk_revision" ]] || { echo 'Binary was built against another SDK revision; rebuild this prefix' >&2; exit 2; }
-export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-87}
-export ROS_LOCALHOST_ONLY=1
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export AMENT_PREFIX_PATH="$sdk_prefix:$prefix:/opt/ros/humble${AMENT_PREFIX_PATH:+:$AMENT_PREFIX_PATH}"
-export LD_LIBRARY_PATH="$sdk_prefix/lib:$prefix/lib:/opt/ros/humble/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-if [[ "$native" == true ]]; then
- exec "$binary" --ros-args -p backend:=unitree_loopback_sim "$@"
-fi
-exec "$binary" --ros-args "$@"
+repo=$(cd -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")" && pwd)
+source "$repo/scripts/launch_common.sh"
+# Keep shell preflight aligned with parse_startup; no process starts on a CLI error.
+arguments=("$@")
+declare -A seen=()
+mode=''
+while (( $# )); do
+ flag=$1; shift
+ [[ -n "$flag" ]] || launch_fail "Empty option"
+ if [[ "$flag" == --ros-args ]]; then break; fi
+ [[ -z ${seen[$flag]+x} ]] || launch_fail "$flag: repeated option"
+ seen[$flag]=1
+ case "$flag" in
+  --sim|--real)
+   [[ -z "$mode" ]] || launch_fail "$flag: conflicting mode selection"
+   mode=$flag ;;
+  --config|--input-config|--input)
+   [[ $# -gt 0 && -n "$1" && "$1" != -* ]] || launch_fail "$flag: missing value"
+   if [[ "$flag" == --input && "$1" != keyboard && "$1" != gamepad && "$1" != remote ]]; then
+    launch_fail '--input: expected keyboard, gamepad or remote'
+   fi
+   shift ;;
+  *) launch_fail "$flag: unknown option (use --sim or --real; test routes are scripts/integration_run.sh)" ;;
+ esac
+done
+select_env_binary anakin_env_native_node
+if [[ -z "$mode" ]]; then arguments=(--real "${arguments[@]}"); fi
+exec "$binary" "${arguments[@]}"

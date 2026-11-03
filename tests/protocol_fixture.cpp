@@ -1,6 +1,6 @@
 // Offline ROS fault fixture. Never opens native SDK channels; only accepts the
-// explicitly labelled, disarmed offline state source.
-#include <anakin_env/gate.hpp>
+// explicitly labelled no-native state source, including Preparing inference permission.
+#include <anakin_env/offline_fixture.hpp>
 #include <anakin_sdk/msg/inference_status.hpp>
 #include <anakin_sdk/srv/switch_inference_mode.hpp>
 #include <chrono>
@@ -10,17 +10,17 @@ using Status = anakin_sdk::msg::InferenceStatus;
 using Switch = anakin_sdk::srv::SwitchInferenceMode;
 class Fixture final : public rclcpp::Node {
  public:
-  Fixture() : Node("anakin_offline_protocol_fixture") {
-    mode_ = declare_parameter<std::string>("fault", "normal");
-    start_ = std::chrono::steady_clock::now();
-    targets_ = create_publisher<anakin::env::Target>("anakin/control_target",
-                                                     rclcpp::QoS(1).best_effort());
-    statuses_ = create_publisher<Status>("anakin/inference_status", rclcpp::QoS(128).reliable());
-    states_ = create_subscription<anakin::env::Frame>(
+  Fixture()
+      : Node("anakin_offline_protocol_fixture"),
+        mode_(declare_parameter<std::string>("fault", "normal")),
+        start_(std::chrono::steady_clock::now()),
+        targets_(create_publisher<anakin::env::Target>("anakin/control_target", rclcpp::QoS(1).best_effort())),
+        statuses_(create_publisher<Status>("anakin/inference_status", rclcpp::QoS(128).reliable())),
+        states_(create_subscription<anakin::env::Frame>(
         "anakin/state", rclcpp::QoS(1).best_effort(), [this](anakin::env::Frame::ConstSharedPtr f) {
-          if (f->header.frame_id == "offline_fixture_base" && !f->execution_authorized) latest_ = f;
-        });
-    service_ = create_service<Switch>(
+          if (anakin::env::is_offline_fixture(*f)) latest_ = f;
+        })),
+        service_(create_service<Switch>(
         "anakin/switch_inference_mode",
         [this](Switch::Request::SharedPtr q, Switch::Response::SharedPtr a) {
           a->mc_instance_id = instance_;
@@ -39,9 +39,8 @@ class Fixture final : public rclcpp::Node {
             RCLCPP_INFO(get_logger(), "FIXTURE_REQUEST model=%s epoch=%lu", q->target_model.c_str(),
                         q->next_epoch);
           }
-        });
-    timer_ = create_wall_timer(20ms, [this] { tick(); });
-  }
+        })),
+        timer_(create_wall_timer(20ms, [this] { tick(); })) {}
 
  private:
   anakin::Uuid instance_ = anakin::new_uuid();
@@ -69,7 +68,9 @@ class Fixture final : public rclcpp::Node {
     s.schema_version = anakin::schema_version;
     s.schema_id = anakin::schema_id;
     s.mc_instance_id = instance_;
-    if (!have_ || !latest_ || latest_->epoch != request_.next_epoch) {
+    if (!have_ || !latest_ || !anakin::env::offline_inference_permitted(*latest_) ||
+        latest_->epoch != request_.next_epoch || latest_->session_id != request_.session_id ||
+        latest_->request_id_seen != request_.request_id) {
       statuses_->publish(s);
       return;
     }

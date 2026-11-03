@@ -2,6 +2,7 @@
 #include <anakin_env/gate.hpp>
 #include <anakin_sdk/simulation_profile.hpp>
 #include <cmath>
+#include <limits>
 namespace anakin::env {
 const Positions& lower_limits() {
   static const Positions a = {
@@ -41,6 +42,8 @@ void Gate::begin(const Uuid& s, const Uuid& i, const Uuid& r, uint64_t e, const 
   phase_mask_ = 0;
   live_ = false;
   expires_ = {};
+  samples_.clear();
+  previous_.reset();
 }
 void Gate::state(const Frame& f, Clock::time_point t) {
   if (f.schema_version != schema_version || f.schema_id != schema_id || f.session_id != session_ ||
@@ -99,7 +102,7 @@ bool Gate::accept(const Target& t, Clock::time_point now, std::string& why) {
     if (semantics_ == mechanical_position) {
       if (q[i] < lower_limits()[i] || q[i] > upper_limits()[i])
         return reject("position limit/nonfinite");
-    } else {
+    } else if (execution_profile_ != sdk_pd_execution_profile) {
       const auto lower = reference_lower_limits(), upper = reference_upper_limits();
       const double cap = simulation_effort_caps(t.model_id)[i];
       const double kp = static_cast<float>(simulation_gains(gain_profile_, t.model_id).kp[i]);
@@ -107,7 +110,9 @@ bool Gate::accept(const Target& t, Clock::time_point now, std::string& why) {
         return reject("virtual reference envelope");
     }
     const double previous = previous_ ? (*previous_)[i] : source->q[i];
-    if (std::abs(q[i] - previous) > .35) return reject("target discontinuity");
+    if (execution_profile_ != sdk_pd_execution_profile && std::abs(q[i] - previous) > .35)
+      return reject("target discontinuity");
+    if (std::abs(q[i]) > std::numeric_limits<float>::max()) return reject("SDK float range");
   }
   previous_ = q;
   accepted_seq_ = t.seq;

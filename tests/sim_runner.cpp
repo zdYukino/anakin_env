@@ -1,3 +1,6 @@
+#include "sim_plan.hpp"
+#include <anakin_sdk/contract.hpp>
+#include <cstdlib>
 #include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
@@ -150,11 +153,9 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     fs::path ws;
-    bool suspended = false, demo = false, rc_loss = false, trace_inference = false;
-    int sdk_domain = 31, ros_domain = 188;
+    bool suspended = false, demo = false, rc_loss = false, trace_inference = false, reset_at_start = false;
+    int sdk_domain = 31, ros_domain = 87;
     double duration = 20., alignment_seconds = 2.;
-    std::string gain_profile = "g1_asap_merged_sim_v1";
-    std::string execution_profile = "g1_position_strict_sim_v1";
     for (int i = 1; i < argc; ++i) {
       const std::string argument = argv[i];
       if (argument == "--workspace" && i + 1 < argc)
@@ -165,6 +166,8 @@ int main(int argc, char** argv) {
         demo = true;
       else if (argument == "--rc-loss")
         rc_loss = true;
+      else if (argument == "--reset-at-start")
+        reset_at_start = true;
       else if (argument == "--trace-inference")
         trace_inference = true;
       else if (argument == "--sdk-domain" && i + 1 < argc)
@@ -175,21 +178,20 @@ int main(int argc, char** argv) {
         duration = std::stod(argv[++i]);
       else if (argument == "--alignment-seconds" && i + 1 < argc)
         alignment_seconds = std::stod(argv[++i]);
-      else if (argument == "--execution-profile" && i + 1 < argc)
-        execution_profile = argv[++i];
-      else if (argument == "--gain-profile" && i + 1 < argc)
-        gain_profile = argv[++i];
       else
         throw std::runtime_error(
             "Usage: --workspace PATH [--suspended] [--demo-switch|--rc-loss] [--duration 20] "
-            "[--sdk-domain 31] [--ros-domain 188] [--execution-profile PROFILE]");
+            "[--sdk-domain 31] [--ros-domain 87] [--reset-at-start]");
     }
     if (ws.empty() || !std::isfinite(duration) || !std::isfinite(alignment_seconds) ||
-        duration < 10 || duration > 60 || alignment_seconds < .25 || alignment_seconds > 5. ||
+        duration <= 0 || duration > 3600 || alignment_seconds < .25 || alignment_seconds > 5. ||
         sdk_domain < 1 || sdk_domain > 232 || ros_domain < 1 || ros_domain > 232 ||
         (demo && rc_loss))
       throw std::runtime_error("Invalid explicit simulation options");
     const auto base = ws.parent_path();
+    const auto prefix = std::getenv("ANAKIN_PREFIX")
+                            ? fs::canonical(std::getenv("ANAKIN_PREFIX"))
+                            : fs::canonical(ws / "install/anakin_env");
     const auto simulator = base / "unitree_mujoco/simulate/build/unitree_mujoco";
     const auto original_scene = base / "unitree_mujoco/unitree_robots/g1/scene_29dof.xml";
     const auto xvfb_installed = fs::path("/usr/bin/Xvfb");
@@ -197,7 +199,7 @@ int main(int argc, char** argv) {
                           ? xvfb_installed
                           : base / "Anakin/build/unitree_mujoco-deps/xvfb/usr/bin/Xvfb";
     for (const auto& path : {simulator, original_scene, xvfb,
-                             ws / "install/anakin_env/lib/anakin_env/anakin_sim_probe"})
+                             prefix / "lib/anakin_env/anakin_sim_probe"})
       if (!fs::exists(path))
         throw std::runtime_error("Simulation prerequisite missing: " + path.string());
     const auto config = read(base / "unitree_mujoco/simulate/config.yaml");
@@ -209,7 +211,7 @@ int main(int argc, char** argv) {
                            .count();
     run =
         ws / "evidence" / ("native-sim-" + std::to_string(stamp) + "-" + std::to_string(getpid()));
-    fs::create_directory(run);
+    fs::create_directories(run);
     const auto scene =
         suspended ? suspended_scene(original_scene.parent_path(), run) : original_scene;
     std::cout << "SIM_EVIDENCE " << run << " supported_base=" << std::boolalpha << suspended
@@ -237,8 +239,9 @@ int main(int argc, char** argv) {
     while (!number.empty() && (number.back() == '\n' || number.back() == '\r')) number.pop_back();
     if (number.empty() || number.find_first_not_of("0123456789") != std::string::npos)
       throw std::runtime_error("Invalid private display number");
-    const auto sdk = ws / "install/anakin_sdk";
-    const auto prefix = ws / "install/anakin_env";
+    const auto sdk = std::getenv("ANAKIN_SDK_PREFIX")
+                         ? fs::canonical(std::getenv("ANAKIN_SDK_PREFIX"))
+                         : fs::canonical(ws / "install/anakin_sdk");
     std::map<std::string, std::string> env{
         {"DISPLAY", ":" + number},
         {"ANAKIN_WS", ws.string()},
@@ -264,34 +267,15 @@ int main(int argc, char** argv) {
     const auto mc = children.spawn("mc", mc_arguments, run / "mc.log", mc_env);
     auto env_env = env;
     env_env["ANAKIN_PREFIX"] = prefix.string();
-    const auto node = children.spawn("env",
-                                     {(base / "anakin_env/en_run.sh").string(),
-                                      "--loopback-sim",
-                                      "-p",
-                                      "sdk_domain:=" + std::to_string(sdk_domain),
-                                      "-p",
-                                      "remote_source:=wireless_topic",
-                                      "-p",
-                                      "duration:=" + std::to_string(duration),
-                                      "-p",
-                                      "alignment_seconds:=" + std::to_string(alignment_seconds),
-                                      "-p",
-                                      "gain_profile:=" + gain_profile,
-                                      "-p",
-                                      "execution_profile:=" + execution_profile,
-                                      "-p",
-                                      "min_active_seconds:=5.0",
-                                      "-p",
-                                      std::string("expected_modes:=") + (demo ? "3" : "1"),
-                                      "-p",
-                                      "result_json:=" + (run / "native-result.json").string(),
-                                      "-p",
-                                      "telemetry_csv:=" + (run / "native.csv").string()},
-                                     run / "env.log", env_env);
+    const auto plan = anakin::env::sim_test::make_plan(
+        prefix, run, base / "anakin_env/en_run.sh", sdk_domain, ros_domain, alignment_seconds);
+    const auto node = children.spawn("env", plan.env_arguments, run / "env.log", env_env);
     const auto probe =
         children.spawn("probe",
                        {(prefix / "lib/anakin_env/anakin_sim_probe").string(), "--ros-args", "-p",
                         "sdk_domain:=" + std::to_string(sdk_domain), "-p",
+                        "duration:=" + std::to_string(duration), "-p",
+                        std::string("reset_at_start:=") + (reset_at_start ? "true" : "false"), "-p",
                         "simulator_pid:=" + std::to_string(children.entries[sim].pid), "-p",
                         "alignment_seconds:=" + std::to_string(alignment_seconds), "-p",
                         std::string("suspended:=") + (suspended ? "true" : "false"), "-p",
@@ -307,36 +291,42 @@ int main(int argc, char** argv) {
              << sdk_domain << ",\n  \"ros_domain\": " << ros_domain
              << ",\n  \"duration\": " << duration << ",\n  \"demo_switch\": " << demo
              << ",\n  \"alignment_seconds\": " << alignment_seconds
-             << ",\n  \"gain_profile\": " << std::quoted(gain_profile)
-             << ",\n  \"execution_profile\": " << std::quoted(execution_profile)
-             << ",\n  \"remote_loss_fault\": " << rc_loss << "\n}\n";
+             << ",\n  \"gain_profile\": " << std::quoted(anakin::merged_gain_profile)
+             << ",\n  \"execution_profile\": " << std::quoted(anakin::sdk_pd_execution_profile)
+             << ",\n  \"remote_loss_zero_retain\": " << rc_loss << "\n}\n";
     write(run / "manifest.json", manifest.str());
     const auto deadline = Clock::now() + std::chrono::duration<double>(duration + 15);
     std::string failure;
     while (Clock::now() < deadline && !interrupted) {
       children.poll();
-      if (!children.entries[node].alive) break;
+      if (!children.entries[node].alive) {
+        failure = "persistent Env exited before test completion";
+        break;
+      }
       if (!children.entries[xserver].alive || !children.entries[sim].alive ||
           !children.entries[mc].alive) {
         failure = "required owned child exited early";
         break;
       }
-      if (!children.entries[probe].alive && children.entries[probe].code != 0) {
-        failure = "simulation probe failed";
+      if (!children.entries[probe].alive) {
+        if (children.entries[probe].code != 0) failure = "simulation probe failed";
         break;
       }
       std::this_thread::sleep_for(20ms);
     }
     children.poll();
-    if (children.entries[node].alive && failure.empty())
-      failure = interrupted ? "interrupted" : "simulation deadline";
+    const bool completed = !children.entries[probe].alive && children.entries[probe].code == 0;
+    if (!completed && failure.empty()) failure = interrupted ? "interrupted" : "test-owned simulation deadline";
+    const bool persistent_until_completion = children.entries[node].alive;
+    // Env has no test lifetime. The harness now owns termination after probe completion.
     children.cleanup();
-    const int expected = rc_loss ? 1 : 0;
-    const bool passed = failure.empty() && children.entries[node].code == expected &&
-                        children.entries[probe].code == 0;
+    const bool controlled_exit = children.entries[node].code == 0 ||
+                                 children.entries[node].code == 128 + SIGINT ||
+                                 children.entries[node].code == 128 + SIGTERM;
+    const bool passed = failure.empty() && completed && persistent_until_completion && controlled_exit;
     std::ostringstream summary;
     summary << std::boolalpha << "{\n  \"success\": " << passed
-            << ",\n  \"expected_env_exit\": " << expected
+            << ",\n  \"test_owned_env_stop\": true"
             << ",\n  \"env_exit\": " << children.entries[node].code
             << ",\n  \"probe_exit\": " << children.entries[probe].code
             << ",\n  \"failure\": " << std::quoted(failure)

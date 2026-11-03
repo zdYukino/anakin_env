@@ -16,17 +16,33 @@ builtin_interfaces::msg::Time system_stamp() {
   stamp.nanosec = static_cast<uint32_t>(ns % 1000000000);
   return stamp;
 }
-void require_loopback(const std::string& interface, int domain) {
-  if (interface != "lo" || domain < 1 || domain > 232)
-    throw std::runtime_error("Only explicit lo simulation with a nonzero DDS domain is supported");
+void validate_transport_endpoint(RuntimeMode mode, const std::string& interface, int domain) {
+  if (interface.empty() || interface.size() >= IFNAMSIZ ||
+      interface.find_first_of(" \t\r\n/") != std::string::npos || domain < 0 || domain > 232)
+    throw std::runtime_error("Expected explicit valid NIC and DDS domain 0..232");
+  if (mode == RuntimeMode::Sim && (interface != "lo" || domain == 0))
+    throw std::runtime_error("Simulation requires explicit lo and a nonzero DDS domain");
+  if (mode == RuntimeMode::Real && interface == "lo")
+    throw std::runtime_error("Real HG requires an explicit robot-facing non-loopback NIC");
+}
+namespace {
+void require_interface(RuntimeMode mode, const std::string& interface, int domain) {
+  validate_transport_endpoint(mode, interface, domain);
   const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) throw std::runtime_error("Cannot inspect loopback interface");
+  if (fd < 0) throw std::runtime_error("Cannot inspect configured SDK interface");
   ifreq request{};
   std::strncpy(request.ifr_name, interface.c_str(), IFNAMSIZ - 1);
   const int result = ioctl(fd, SIOCGIFFLAGS, &request);
   close(fd);
-  if (result < 0 || !(request.ifr_flags & IFF_LOOPBACK) || !(request.ifr_flags & IFF_UP))
-    throw std::runtime_error("SDK interface is not an active loopback interface");
+  const bool loopback = request.ifr_flags & IFF_LOOPBACK;
+  if (result < 0 || !(request.ifr_flags & IFF_UP) || loopback != (mode == RuntimeMode::Sim))
+    throw std::runtime_error("Configured SDK interface is unavailable/down or has the wrong loopback type: " + interface);
+}
+}  // namespace
+void require_loopback(const std::string& interface, int domain) { require_interface(RuntimeMode::Sim, interface, domain); }
+Frame decode_g1_feedback(const LowState& state) {
+  if (state.mode_machine() != 5) throw std::runtime_error("Only G1 canonical29 HG machine mode 5 is supported");
+  return decode_state(state);
 }
 RemoteSample decode_remote(const std::array<uint8_t, 40>& bytes) {
   RemoteSample r;
@@ -51,7 +67,17 @@ NativeTransport::~NativeTransport() {
 }
 void NativeTransport::start_loopback(const std::string& interface, int domain,
                                      bool wireless_topic) {
-  require_loopback(interface, domain);
+  ModeConfig config;
+  config.mode = RuntimeMode::Sim;
+  config.transport.interface = interface;
+  config.transport.sdk_domain = domain;
+  config.transport.odometry_topic = "rt/sportmodestate";
+  start(config, wireless_topic);
+}
+void NativeTransport::start(const ModeConfig& config, bool wireless_topic) {
+  const auto& interface = config.transport.interface;
+  const auto domain = config.transport.sdk_domain;
+  require_interface(config.mode, interface, domain);
   if (started_) throw std::runtime_error("Native transport already started");
   wireless_topic_ = wireless_topic;
   unitree::robot::ChannelFactory::Instance()->Init(domain, interface);
@@ -62,20 +88,19 @@ void NativeTransport::start_loopback(const std::string& interface, int domain,
       [this](const void* message) {
         try {
           const auto& low = *static_cast<const LowState*>(message);
-          auto frame = decode_state(low);
-          if (low.mode_machine() != 5)
-            throw std::runtime_error("Expected G1 29-motor machine mode 5");
+          auto frame = decode_g1_feedback(low);
           const auto acquired = Clock::now();
           const auto stamp = system_stamp();
           frame.header.stamp = stamp;
           frame.joints.header.stamp = stamp;
           frame.imu.header.stamp = stamp;
           std::lock_guard<std::mutex> lock(mutex_);
-          // A duplicate SDK tick never renews source-state freshness.
-          if (sample_ && low.tick() == sample_->frame.sdk_tick) return;
-          if (sample_ && low.tick() < sample_->frame.sdk_tick) ++resets_;
-          sample_ = NativeSample{std::move(frame), acquired, low.mode_machine(), ++generation_};
-          if (!wireless_topic_) remote_ = decode_remote(low.wireless_remote());
+          feedback_.observe(std::move(frame), low.mode_machine(), acquired);
+          resets_ = feedback_.rollbacks();  // Diagnostic counter; runtime selects the guard.
+          if (!wireless_topic_) {
+            remote_ = decode_remote(low.wireless_remote());
+            if (remote_sink_) remote_sink_(remote_);
+          }
         } catch (const std::exception&) {
           ++bad_;
         }
@@ -100,11 +125,12 @@ void NativeTransport::start_loopback(const std::string& interface, int domain,
           remote.valid = true;
           std::lock_guard<std::mutex> lock(mutex_);
           remote_ = remote;
+          if (remote_sink_) remote_sink_(remote_);
         },
         1);
   }
   odometry_subscriber_ =
-      std::make_unique<unitree::robot::ChannelSubscriber<Sport>>("rt/sportmodestate");
+      std::make_unique<unitree::robot::ChannelSubscriber<Sport>>(config.transport.odometry_topic);
   odometry_subscriber_->InitChannel(
       [this](const void* message) {
         const auto& s = *static_cast<const Sport*>(message);
@@ -127,7 +153,7 @@ void NativeTransport::start_loopback(const std::string& interface, int domain,
 }
 std::optional<NativeSample> NativeTransport::sample() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return sample_;
+  return feedback_.sample();
 }
 RemoteSample NativeTransport::remote() const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -139,6 +165,8 @@ OdometrySample NativeTransport::odometry() const {
 }
 bool NativeTransport::write(const LowCommand& command) {
   if (!started_ || !publisher_) return false;
-  return publisher_->Write(command, 0);
+  LowCommand packet = command;
+  finalize_command(packet);
+  return publisher_->Write(packet, 0);
 }
 }  // namespace anakin::env

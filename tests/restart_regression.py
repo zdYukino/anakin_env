@@ -20,7 +20,10 @@ def stop(process):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument("--workspace",required=True,type=Path);args=parser.parse_args()
     ws=args.workspace.resolve();out=ws/"evidence"/f"restart-regression-{time.time_ns()}";out.mkdir()
-    env=os.environ.copy();env.update(ANAKIN_WS=str(ws),ROS_DOMAIN_ID="194",ROS_LOCALHOST_ONLY="1")
+    env=os.environ.copy();env.update(ANAKIN_WS=str(ws),ROS_DOMAIN_ID="194",ROS_LOCALHOST_ONLY="1",
+        RMW_IMPLEMENTATION="rmw_fastrtps_cpp",
+        AMENT_PREFIX_PATH=f"{ws}/install/anakin_sdk:{ws}/install/anakin_env:/opt/ros/humble",
+        LD_LIBRARY_PATH=f"{ws}/install/anakin_sdk/lib:{ws}/install/anakin_env/lib:/opt/ros/humble/lib")
     mc_env=env.copy();mc_env["ANAKIN_PREFIX"]=str(ws/"install/anakin_mc")
     env_env=env.copy();env_env["ANAKIN_PREFIX"]=str(ws/"install/anakin_env")
     server=None;node=None;sessions=[]
@@ -30,7 +33,7 @@ def main():
             original_pid=server.pid
             for run in range(2):
                 with (out/f"env-{run}.log").open("w") as node_log:
-                    node=subprocess.Popen([str(ws.parent/"anakin_env/en_run.sh"),"-p","duration:=2.0"],env=env_env,stdout=node_log,stderr=subprocess.STDOUT)
+                    node=subprocess.Popen([str(ws/"install/anakin_env/lib/anakin_env/anakin_env_node"),"--ros-args","-p","duration:=2.0"],env=env_env,stdout=node_log,stderr=subprocess.STDOUT)
                     code=node.wait(timeout=7)
                 if code:raise RuntimeError(f"env restart {run} exited {code}")
                 text=(out/f"env-{run}.log").read_text()

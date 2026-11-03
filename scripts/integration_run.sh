@@ -4,14 +4,20 @@ script=$(realpath -- "${BASH_SOURCE[0]}")
 repo=$(cd -- "$(dirname -- "$script")/.." && pwd)
 ws=${ANAKIN_WS:-"$repo/../anakin_cpp_ws"}
 ws=$(cd -- "$ws" && pwd)
-if [[ ${1:-} == --loopback-sim ]]; then
- shift
- exec "$ws/install/anakin_env/lib/anakin_env/anakin_sim_runner" --workspace "$ws" "$@"
-fi
+source "$repo/scripts/launch_common.sh"
+case ${1:-} in
+ --sim-test)
+  shift
+  select_env_binary anakin_sim_runner
+  exec "$binary" --workspace "$ws" "$@" ;;
+ --offline-test) shift ;;
+ *) launch_fail 'Usage: scripts/integration_run.sh --offline-test [--demo-switch] | --sim-test [runner options]' ;;
+esac
+select_env_binary anakin_env_node
 demo=false
 duration=8.0
 if [[ ${1:-} == --demo-switch ]]; then demo=true; duration=12.0; shift; fi
-if (( $# )); then echo 'Usage: ./en_run.sh [--demo-switch]' >&2; exit 2; fi
+if (( $# )); then launch_fail 'Usage: scripts/integration_run.sh --offline-test [--demo-switch]'; fi
 export ANAKIN_WS="$ws"
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-87}
 run="$ws/evidence/run-$(date -u +%Y%m%dT%H%M%S)-$$"
@@ -50,7 +56,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 ANAKIN_PREFIX="$ws/install/anakin_mc" "$ws/../anakin_mc/en_run.sh" >"$run/mc.log" 2>&1 &
 mc_pid=$!; pids+=("$mc_pid")
-ANAKIN_PREFIX="$ws/install/anakin_env" "$ws/../anakin_env/en_run.sh" -p "duration:=$duration" -p "demo_switch:=$demo" >"$run/env.log" 2>&1 &
+"$binary" --ros-args -p "duration:=$duration" -p "demo_switch:=$demo" >"$run/env.log" 2>&1 &
 env_pid=$!; pids+=("$env_pid")
 set +e
 wait -n -p finished "$mc_pid" "$env_pid"

@@ -1,0 +1,79 @@
+schema_version: 1
+mode: real
+initial_state: disarmed
+# Deployment value: set this explicitly to the robot-facing NIC. No NIC is auto-detected.
+transport: {interface: eth0, sdk_domain: 0, ros_domain: 87, odometry_topic: rt/odommodestate, base_frame: unitree_base, odometry_frame: unitree_odom}
+guards:
+  allow_fallen: false
+  fault_on_tick_rollback: true
+  require_primary_input: true
+  strict_deadlines: true
+  enforce_measured_joint_limits: true
+  max_tilt_radians: 1.0
+  min_base_height: 0.3
+  state_timeout_ms: 40
+  input_timeout_ms: 250
+  source_loss: fault
+timing: {alignment_seconds: 2.0, damping_seconds: 0.1, authority_timeout_ms: 3000, policy_timeout_ms: 5000}
+states:
+  disarmed:
+    outputs: {ros_state: true, lowcmd: false}
+    command: none
+    on_enter: [revoke_actuation, release_if_owned]
+    on_exit: []
+  damping:
+    outputs: {ros_state: true, lowcmd: true}
+    command: damping
+    on_enter: [revoke_actuation]
+    on_exit: []
+  align:
+    outputs: {ros_state: true, lowcmd: true}
+    command: stand_interpolation
+    on_enter: [revoke_actuation, acquire_authority, begin_alignment]
+    on_exit: []
+  hold:
+    outputs: {ros_state: true, lowcmd: true}
+    command: fixed_stand
+    on_enter: [revoke_actuation]
+    on_exit: []
+  asap_loco:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    model: asap_loco
+    on_enter: []
+    on_exit: []
+  asap_cr7:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    model: asap_cr7
+    on_enter: []
+    on_exit: []
+  preparing:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    preparing_fallback: {from_hold: fixed_stand, otherwise: damping}
+    on_enter: [revoke_actuation, request_policy]
+    on_exit: []
+  fault:
+    outputs: {ros_state: true, lowcmd: false}
+    command: none
+    on_enter: [revoke_actuation, release_if_owned]
+    on_exit: []
+manual_transitions:
+  - {from: disarmed, to: align}
+  - {from: hold, to: asap_loco, via: preparing}
+  - {from: asap_loco, to: asap_cr7, via: preparing}
+  - {from: asap_cr7, to: asap_loco, via: preparing}
+  - {from: [align, hold, asap_loco, asap_cr7, preparing], to: disarmed, via: damping}
+  - {from: damping, to: disarmed}
+  - {from: '*', to: damping}
+automatic_transitions:
+  - {from: align, event: alignment_complete, to: hold}
+  - {from: preparing, event: policy_ready, to: requested}
+  - {from: asap_cr7, event: motion_done, to: asap_loco, via: preparing}
+  - {from: damping, event: damping_complete, to: disarmed}
+system_transitions:
+  - {from: '*', event: emergency_stop, to: damping}
+  - {from: '*', event: fault, to: fault}
+  - {from: fault, event: fault, to: fault}
+  - {from: fault, event: clear_fault, to: disarmed}

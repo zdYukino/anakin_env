@@ -1,756 +1,221 @@
-#include <anakin_env/confirmation.hpp>
-#include <anakin_env/discovery.hpp>
-#include <anakin_env/execution.hpp>
-#include <anakin_env/reference.hpp>
-#include <anakin_env/send.hpp>
+#include <anakin_env/runtime.hpp>
+#include <anakin_env/authority.hpp>
+#include <anakin_env/startup.hpp>
 #include <anakin_env/transport.hpp>
-#include <anakin_sdk/srv/switch_inference_mode.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <atomic>
-#include <fstream>
-#include <iomanip>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
-#include <rclcpp/rclcpp.hpp>
-#include <sstream>
 #include <thread>
+#include <unistd.h>
 using namespace std::chrono_literals;
 
 namespace anakin::env {
 using Switch = anakin_sdk::srv::SwitchInferenceMode;
-using Status = anakin_sdk::msg::InferenceStatus;
+class LoopbackBackend final : public RuntimeBackend {
+ public:
+  explicit LoopbackBackend(NativeTransport& transport) : transport_(transport) {}
+  bool authority_owned() const override { return true; } // Simulation has no hardware authority RPC.
+  void begin_acquire(uint64_t, std::chrono::milliseconds) override {}
+  AuthorityProgress poll_acquire(uint64_t) override { return AuthorityProgress::Owned; }
+  void cancel_acquire(uint64_t) override {}
+  void release_authority() override {}
+  bool write(const LowCommand& command) override { return transport_.write(command); }
+ private:
+  NativeTransport& transport_;
+};
+
 class NativeNode final : public rclcpp::Node {
  public:
-  NativeNode() : rclcpp::Node("anakin_env") {
+  explicit NativeNode(Configuration configuration)
+      : rclcpp::Node("anakin_env"), configuration_(std::move(configuration)),
+        inputs_(configuration_.inputs, configuration_.mode.guards.input_timeout) {
     if (get_parameter("use_sim_time").as_bool())
-      throw std::runtime_error("Native monotonic loop requires use_sim_time=false");
-    if (declare_parameter<std::string>("backend", "") != "unitree_loopback_sim")
-      throw std::runtime_error(
-          "Choose backend=unitree_loopback_sim explicitly; hardware is unsupported");
-    if (declare_parameter<bool>("arm", false))
-      throw std::runtime_error("Construction cannot arm; deliberate fresh RC edges are required");
-    const auto interface = declare_parameter<std::string>("interface", "lo");
-    const int domain = declare_parameter<int>("sdk_domain", 31);
-    const auto remote = declare_parameter<std::string>("remote_source", "lowstate");
-    if (remote != "lowstate" && remote != "wireless_topic")
-      throw std::runtime_error("remote_source must be lowstate or wireless_topic");
-    gain_profile_ = declare_parameter<std::string>("gain_profile", merged_gain_profile);
-    if (!known_gain_profile(gain_profile_))
-      throw std::runtime_error("Unknown simulation gain profile");
-    execution_profile_ =
-        declare_parameter<std::string>("execution_profile", strict_execution_profile);
-    const int semantics =
-        declare_parameter<int>("command_semantics", profile_semantics(execution_profile_));
-    if (semantics < 0 || semantics > 255 ||
-        !known_execution_contract(execution_profile_, static_cast<uint8_t>(semantics),
-                                  gain_profile_))
-      throw std::runtime_error("Unknown/mismatched execution profile, semantics or gains");
-    command_semantics_ = static_cast<uint8_t>(semantics);
-    // Must occur before NativeTransport::start_loopback; there are no runtime
-    // parameter overrides for missing frozen budgets or unit-test fixture budgets.
-    require_native_reference_budget(execution_profile_, command_semantics_,
-                                    frozen_reference_budget());
-    const double alignment_seconds = declare_parameter<double>("alignment_seconds", 2.);
-    control_.set_alignment_seconds(alignment_seconds);
-    duration_ = declare_parameter<double>("duration", 20.);
-    min_active_ = declare_parameter<double>("min_active_seconds", 5.);
-    expected_modes_ = declare_parameter<int>("expected_modes", 1);
-    if (!std::isfinite(duration_) || duration_ < 1 || duration_ > 300 ||
-        !std::isfinite(min_active_) || min_active_ < 0 || min_active_ > duration_ ||
-        expected_modes_ < 1 || expected_modes_ > 3)
-      throw std::runtime_error("Invalid finite run acceptance parameters");
-    result_path_ = declare_parameter<std::string>("result_json", "");
-    const auto csv_path = declare_parameter<std::string>("telemetry_csv", "");
-    if (!csv_path.empty()) {
-      telemetry_.open(csv_path);
-      if (!telemetry_) throw std::runtime_error("Cannot open native telemetry");
-      telemetry_ << "elapsed,sdk_tick,state_seq,epoch,mode,accepted_seq,published_seq,sdk_writes,"
-                    "tilt,height,source_age_ms,rc_age_ms\n";
-    }
-    pub_ =
-        create_publisher<Frame>("anakin/state", rclcpp::QoS(1).best_effort().durability_volatile());
-    target_sub_ = create_subscription<Target>(
-        "anakin/control_target", rclcpp::QoS(1).best_effort().durability_volatile(),
-        [this](Target::ConstSharedPtr target) { on_target(*target); });
-    status_sub_ = create_subscription<Status>(
-        "anakin/inference_status", rclcpp::QoS(128).reliable().durability_volatile(),
-        [this](Status::ConstSharedPtr status) { on_status(*status); });
+      throw std::runtime_error("Native acquisition uses a monotonic clock; use_sim_time must be false");
+    if (configuration_.mode.mode == RuntimeMode::Sim)
+      backend_ = std::make_unique<LoopbackBackend>(transport_);
+    else
+      backend_ = std::make_unique<RealBackend>(make_sdk_motion_switcher(),
+          [this](const LowCommand& command) { return transport_.write(command); });
+    controller_ = std::make_unique<RuntimeController>(configuration_.mode, *backend_,
+        [this] { return inputs_.snapshot(); });
+    publisher_ = create_publisher<Frame>("anakin/state", rclcpp::QoS(1).best_effort().durability_volatile());
+    targets_ = create_subscription<Target>("anakin/control_target", rclcpp::QoS(1).best_effort().durability_volatile(),
+        [this](Target::ConstSharedPtr target) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          controller_->target(*target);
+        });
+    statuses_ = create_subscription<RuntimeStatus>("anakin/inference_status", rclcpp::QoS(128).reliable().durability_volatile(),
+        [this](RuntimeStatus::ConstSharedPtr status) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          controller_->status(*status);
+        });
     client_ = create_client<Switch>("anakin/switch_inference_mode");
-    gate_.stop();
-    // Init opens explicit simulation channels only. It does not authorize a write.
-    transport_.start_loopback(interface, domain, remote == "wireless_topic");
-    RCLCPP_INFO(
-        get_logger(),
-        "NATIVE_SIM disarmed; interface=lo SDK-domain=%d; RC source=%s; no hardware backend",
-        domain, remote.c_str());
-    if (command_semantics_ == pd_reference && !result_path_.empty()) {
-      reference_trace_.open(result_path_ + ".references.jsonl");
-      if (!reference_trace_)
-        throw std::runtime_error("Cannot open reference execution diagnostics");
-    }
-    started_ = Clock::now();
+    transport_.set_remote_sink([this](const RemoteSample& remote) {
+      inputs_.submit(UnitreeRemoteAdapter::wireless(remote.keys, remote.axes, remote.acquired, remote.valid));
+    });
+    transport_.start(configuration_.mode, configuration_.inputs.remote_channel == RemoteChannel::WirelessTopic);
+    RCLCPP_INFO(get_logger(), "Env %s: persistent, disarmed, feedback-only startup; config=%s input=%s",
+        to_string(configuration_.mode.mode).c_str(),
+        configuration_.paths.mode.c_str(), configuration_.paths.inputs.c_str());
     worker_ = std::thread([this] { run(); });
   }
   ~NativeNode() override {
     stopping_ = true;
     if (worker_.joinable()) worker_.join();
   }
-  std::atomic<bool> completed{false}, success{false};
-
  private:
-  std::mutex mutex_;
+  Configuration configuration_;
+  InputHub inputs_;
   NativeTransport transport_;
-  LocalControl control_;
-  RemoteEdges remote_edges_;
-  MotionCommand commands_;
-  Gate gate_;
-  ActiveConfirmation confirmation_;
-  TransactionHealth health_;
-  ActiveRunAcceptance run_acceptance_;
-  Uuid session_ = new_uuid(), env_instance_ = new_uuid(), mc_instance_{};
-  NativeStatusRouter status_router_{session_};
-  Switch::Request request_{};
-  std::optional<Target> target_;
-  uint64_t epoch_ = 0, state_seq_ = 0, generation_ = 0, accepted_ = 0, rejected_ = 0;
-  uint64_t send_generation_ = 0;
-  uint64_t bad_baseline_ = 0, reset_baseline_ = 0, sdk_writes_ = 0, active_writes_ = 0,
-           damping_writes_ = 0, local_writes_ = 0, loop_ticks_ = 0, skipped_periods_ = 0;
-  bool terminal_failure_ = false, have_request_ = false, accepted_request_ = false,
-       in_flight_ = false, completion_counted_ = false, preparing_damp_ = false;
-  int64_t pending_id_ = 0;
-  int expected_modes_ = 1, completed_modes_ = 0;
-  double duration_ = 20., min_active_ = 5., min_height_ = 100., max_tilt_ = 0.,
-         active_seconds_ = 0., max_write_gap_ms_ = 0., max_lateness_ms_ = 0.;
-  Clock::time_point started_{}, sent_{}, last_write_{}, first_write_{}, final_write_{};
-  std::vector<double> sdk_gaps_ms_;
+  std::unique_ptr<RuntimeBackend> backend_;
+  std::unique_ptr<RuntimeController> controller_;
+  std::mutex mutex_;
   std::atomic<bool> stopping_{false};
   std::thread worker_;
-  std::string failure_, last_reject_, result_path_, gain_profile_, execution_profile_;
-  uint8_t command_semantics_ = mechanical_position;
-  SaturationWatch saturation_watch_;
-  uint64_t projection_events_ = 0, saturation_samples_ = 0;
-  double peak_compensation_ = 0, peak_total_effort_ = 0;
-  std::ofstream reference_trace_;
-  std::ofstream telemetry_;
-  Frame frame_;
-  std::optional<NativeSample> native_;
-  struct Receipt {
-    Uuid instance{}, request{};
-    uint64_t epoch = 0, seq = 0;
-    uint8_t mask = 0;
-  } published_;
-  rclcpp::Publisher<Frame>::SharedPtr pub_;
-  rclcpp::Subscription<Target>::SharedPtr target_sub_;
-  rclcpp::Subscription<Status>::SharedPtr status_sub_;
+  uint64_t bad_packets_ = 0;
+  std::optional<Uuid> in_flight_;
+  Clock::time_point sent_{};
+  int64_t pending_id_ = 0;
+  std::string last_diagnostic_;
+  std::string last_authority_diagnostic_;
+  rclcpp::Publisher<Frame>::SharedPtr publisher_;
+  rclcpp::Subscription<Target>::SharedPtr targets_;
+  rclcpp::Subscription<RuntimeStatus>::SharedPtr statuses_;
   rclcpp::Client<Switch>::SharedPtr client_;
-
-  void stop_local(const std::string& why, bool failure) {
-    ++send_generation_;
-    gate_.stop();
-    status_router_.revoke();
-    target_.reset();
-    run_acceptance_.break_tail();
-    health_.fail();
-    control_.stop(Clock::now(), failure);
-    if (failure && !terminal_failure_) {
-      terminal_failure_ = true;
-      failure_ = why;
-      RCLCPP_ERROR(get_logger(), "NATIVE local stop latched: %s", why.c_str());
-    } else if (!failure) {
-      have_request_ = false;
-      RCLCPP_INFO(get_logger(), "NATIVE local RC stop; new deliberate authorization required");
-    }
-  }
-  void start_request(std::string model) {
-    if (terminal_failure_ || zero(mc_instance_)) return;
-    const bool startup_profile = control_.mode() == ExecutionMode::Hold;
-    preparing_damp_ = control_.mode() != ExecutionMode::Hold;
-    control_.prepare();
-    ++send_generation_;
-    ++epoch_;
-    request_ = Switch::Request{};
-    request_.session_id = session_;
-    request_.expected_mc_instance_id = mc_instance_;
-    request_.request_id = new_uuid();
-    request_.next_epoch = epoch_;
-    request_.source_state_seq = state_seq_ + 1;
-    request_.schema_id = schema_id;
-    request_.target_model = model;
-    run_acceptance_.begin(model, epoch_);
-    request_.gain_profile = gain_profile_;
-    request_.execution_profile = execution_profile_;
-    request_.command_semantics = command_semantics_;
-    request_.transition_profile = startup_profile ? "g1_startup_v1" : "g1_named_upper_v1";
-    request_.allow_source_continuation = true;
-    request_.timeout.sec = 5;
-    status_router_.bind(request_, control_.authorized());
-    gate_.begin(session_, mc_instance_, request_.request_id, epoch_, model, true, gain_profile_,
-                execution_profile_, command_semantics_);
-    confirmation_.begin(session_, mc_instance_, request_.request_id, epoch_);
-    health_.begin(Clock::now() + 5s);
-    target_.reset();
-    if (in_flight_) client_->remove_pending_request(pending_id_);
-    in_flight_ = false;
-    accepted_request_ = false;
-    have_request_ = true;
-    completion_counted_ = false;
-    RCLCPP_INFO(get_logger(),
-                "NATIVE env requested %s epoch=%lu; accepted response is not completion",
-                model.c_str(), epoch_);
-  }
-  bool published_active() const {
-    return published_.instance == mc_instance_ && published_.request == request_.request_id &&
-           published_.epoch == epoch_ && (published_.mask & Target::TARGET_ACTIVE);
-  }
-  void maybe_complete() {
-    if (!terminal_failure_ && !completion_counted_ && confirmation_.active() &&
-        published_active()) {
-      if (!run_acceptance_.confirm(request_.target_model, epoch_)) return;
-      completed_modes_ = static_cast<int>(run_acceptance_.models().size());
-      completion_counted_ = true;
-      RCLCPP_INFO(get_logger(),
-                  "SDK_PUBLISHED epoch=%lu active-seq=%lu; writer receipt, not actuator execution",
-                  epoch_, published_.seq);
-    }
-  }
-  void on_target(const Target& target) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (terminal_failure_ || !have_request_ || !control_.authorized()) return;
-    std::string why;
-    if (gate_.accept(target, Clock::now(), why)) {
-      ++accepted_;
-      target_ = target;
-      health_.valid_target();
-      confirmation_.target(target);
-    } else {
-      ++rejected_;
-      if (why != last_reject_)
-        RCLCPP_ERROR(get_logger(), "Rejected native target seq=%lu model=%s reason=%s", target.seq,
-                     target.model_id.c_str(), why.c_str());
-      last_reject_ = why;
-    }
-  }
-  void on_status(const Status& status) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto route = status_router_.observe(status);
-    if (route == NativeStatusRouter::Decision::Discovered) {
-      mc_instance_ = status_router_.instance();
-      return;
-    }
-    if (route == NativeStatusRouter::Decision::Ignore) return;
-    if (route == NativeStatusRouter::Decision::InstanceChanged) {
-      stop_local("MC instance changed; restart with explicit authorization", true);
-      return;
-    }
-    if (route == NativeStatusRouter::Decision::ContractMismatch) {
-      stop_local("MC status execution contract mismatch", true);
-      return;
-    }
-    confirmation_.status(status);
-    if (status.state == Status::FAILED) {
-      stop_local("MC transaction failed: " + status.detail, true);
-      return;
-    }
-    maybe_complete();
-    if (!terminal_failure_ && request_.target_model == "asap_cr7" && completion_counted_ &&
-        status.motion_done)
-      start_request("asap_loco");  // only env allocates the fallback epoch
+  bool enabled(InputSource source) const {
+    const auto& sources = configuration_.inputs.enabled_sources;
+    return std::find(sources.begin(), sources.end(), source) != sources.end();
   }
   void send_request(Clock::time_point now) {
-    if (!have_request_ || accepted_request_ || terminal_failure_) return;
-    if (in_flight_ && now - sent_ > 500ms) {
+    const auto& request = controller_->request();
+    if (in_flight_ && (!request || *in_flight_ != request->request_id || now - sent_ >= 500ms)) {
       client_->remove_pending_request(pending_id_);
-      in_flight_ = false;
+      in_flight_.reset();
     }
-    if (in_flight_ || !client_->service_is_ready()) return;
-    const auto id = request_.request_id;
-    auto future = client_->async_send_request(
-        std::make_shared<Switch::Request>(request_),
-        [this, id](rclcpp::Client<Switch>::SharedFuture future) {
+    if (!request || controller_->request_accepted() || in_flight_ || !client_->service_is_ready()) return;
+    const auto copy = *request;
+    in_flight_ = copy.request_id;
+    sent_ = now;
+    auto future = client_->async_send_request(std::make_shared<Switch::Request>(copy),
+        [this, copy](rclcpp::Client<Switch>::SharedFuture future) {
           std::lock_guard<std::mutex> lock(mutex_);
-          if (id != request_.request_id || terminal_failure_) return;
-          in_flight_ = false;
+          if (!in_flight_ || *in_flight_ != copy.request_id) return;
+          in_flight_.reset();
           try {
             const auto response = future.get();
-            if (response->accepted && response->mc_instance_id == mc_instance_ &&
-                response->epoch == epoch_ && response->execution_profile == execution_profile_ &&
-                response->command_semantics == command_semantics_ &&
-                response->gain_profile == gain_profile_)
-              accepted_request_ = true;
-            else
-              stop_local("Inference request rejected: " + response->detail, true);
-          } catch (const std::exception& error) {
-            stop_local(error.what(), true);
-          }
+            controller_->request_result(copy.request_id, response->accepted &&
+                response->mc_instance_id == copy.expected_mc_instance_id && response->epoch == copy.next_epoch &&
+                response->execution_profile == copy.execution_profile && response->command_semantics == copy.command_semantics &&
+                response->gain_profile == copy.gain_profile);
+          } catch (const std::exception& error) { controller_->feedback_fault(error.what()); }
         });
     pending_id_ = future.request_id;
-    in_flight_ = true;
-    sent_ = now;
-  }
-  static double tilt(const Frame& f) {
-    const auto& q = f.imu.orientation;
-    return std::acos(std::clamp(1. - 2. * (q.x * q.x + q.y * q.y), -1., 1.));
-  }
-  void fill_frame(const NativeSample& sample, const RemoteSample& rc,
-                  const OdometrySample& odometry, Clock::time_point now) {
-    frame_ = sample.frame;
-    frame_.header.frame_id = "unitree_sim_base";
-    frame_.joints.header = frame_.header;
-    frame_.imu.header = frame_.header;
-    frame_.session_id = session_;
-    frame_.env_instance_id = env_instance_;
-    frame_.epoch = epoch_;
-    frame_.state_seq = state_seq_;
-    frame_.gain_profile = gain_profile_;
-    frame_.execution_profile = execution_profile_;
-    frame_.command_semantics = command_semantics_;
-    frame_.execution_mode = static_cast<uint8_t>(control_.mode());
-    frame_.execution_authorized = control_.mode() == ExecutionMode::Active && gate_.live(now) &&
-                                  now - sample.acquired <= 40ms && rc.valid &&
-                                  now - rc.acquired <= 250ms;
-    frame_.command.header.stamp = system_stamp();
-    frame_.command.header.frame_id = frame_.header.frame_id;
-    frame_.command_base_height = commands_.height();
-    frame_.command_stand = commands_.moving();
-    if (rc.valid && now - rc.acquired <= 250ms) {
-      frame_.remote.header.stamp = rc.stamp;
-      frame_.remote.header.frame_id = frame_.header.frame_id;
-      frame_.remote.axes.assign(rc.axes.begin(), rc.axes.end());
-      for (size_t i = 0; i < 16; ++i) frame_.remote.buttons.push_back((rc.keys >> i) & 1u);
-      const auto velocity = commands_.velocity(rc);
-      frame_.command.twist.linear.x = velocity[0];
-      frame_.command.twist.linear.y = velocity[1];
-      frame_.command.twist.angular.z = velocity[2];
-      frame_.validity |= Frame::VALID_RC | Frame::VALID_COMMAND;
-    }
-    if (odometry.valid && now - odometry.acquired <= 100ms) {
-      frame_.odometry.header.stamp = odometry.stamp;
-      frame_.odometry.header.frame_id = "unitree_sim_world";
-      frame_.odometry.child_frame_id = frame_.header.frame_id;
-      frame_.odometry.pose.pose.position.x = odometry.position[0];
-      frame_.odometry.pose.pose.position.y = odometry.position[1];
-      frame_.odometry.pose.pose.position.z = odometry.position[2];
-      frame_.odometry.pose.pose.orientation = frame_.imu.orientation;
-      const auto body_velocity = world_to_body(frame_.imu.orientation, odometry.velocity);
-      frame_.odometry.twist.twist.linear.x = body_velocity[0];
-      frame_.odometry.twist.twist.linear.y = body_velocity[1];
-      frame_.odometry.twist.twist.linear.z = body_velocity[2];
-      frame_.odometry.twist.twist.angular = frame_.imu.angular_velocity;
-      frame_.validity |= Frame::VALID_ODOMETRY;
-    }
-    frame_.mc_instance_seen = mc_instance_;
-    frame_.request_id_seen = request_.request_id;
-    frame_.target_seq_seen = gate_.accepted_seq();
-    frame_.phase_mask_seen = gate_.phase_mask();
-    frame_.sdk_published_mc_instance_id = published_.instance;
-    frame_.sdk_published_request_id = published_.request;
-    frame_.sdk_published_epoch = published_.epoch;
-    frame_.sdk_published_target_seq = published_.seq;
-    frame_.sdk_published_phase_mask = published_.mask;
-    frame_.sdk_publish_count = sdk_writes_;
-    diagnostic_msgs::msg::DiagnosticStatus diagnostic;
-    diagnostic.name = "anakin_env/loopback_native";
-    diagnostic.level = terminal_failure_ ? diagnostic.ERROR : diagnostic.OK;
-    diagnostic.message = terminal_failure_
-                             ? failure_
-                             : "loopback simulation; SDK publication is not physical execution";
-    frame_.diagnostics.header.stamp = system_stamp();
-    frame_.diagnostics.status.push_back(diagnostic);
-  }
-  bool write_command(LowCommand command, Clock::time_point now, const Target* input_target,
-                     bool damping, Clock::time_point absolute_end = Clock::time_point::max()) {
-    // Keep the attempted transaction alive if an encoding fault locally revokes target_.
-    const std::optional<Target> target_copy =
-        input_target ? std::optional<Target>(*input_target) : std::nullopt;
-    const auto* target = target_copy ? &*target_copy : nullptr;
-    const SendRequest request{damping, target != nullptr, send_generation_, absolute_end};
-    std::optional<NativeSample> sampled;
-    const auto observe = [&] {
-      sampled = transport_.sample();
-      const auto remote = transport_.remote();
-      SendSnapshot snapshot;
-      snapshot.position_authorized = control_.authorized() && !stopping_;
-      snapshot.damping_allowed = control_.damping(Clock::now());
-      snapshot.damping_deadline = control_.damping_deadline();
-      snapshot.stop_requested = remote.valid && (remote.keys & ((1u << 8) | (1u << 9)));
-      snapshot.state_available = sampled.has_value();
-      snapshot.feedback_integrity_ok =
-          transport_.bad_packets() == bad_baseline_ && transport_.resets() == reset_baseline_;
-      if (sampled) {
-        snapshot.state_acquired = sampled->acquired;
-        snapshot.feedback_generation = sampled->generation;
-      }
-      snapshot.remote_valid = remote.valid;
-      snapshot.remote_acquired = remote.acquired;
-      snapshot.target_authorized = gate_.live(Clock::now());
-      snapshot.target_deadline = gate_.deadline();
-      snapshot.authorization_generation = send_generation_;
-      return snapshot;
-    };
-    const auto encode = [&](const SendSnapshot&) {
-      PreparedSend<LowCommand> prepared{command, std::nullopt};
-      if (target && command_semantics_ == mechanical_position) {
-        Positions q{};
-        std::copy_n(target->target.points[0].positions.begin(), 29, q.begin());
-        prepared.command =
-            encode_position(q, sampled->mode_machine, target->gain_profile, target->model_id);
-      }
-      if (target && command_semantics_ == pd_reference) {
-        const auto feedback = sampled;
-        if (!feedback || Clock::now() - feedback->acquired > 40ms) {
-          throw std::runtime_error("Reference state stale before encoding");
-        }
-        prepared.feedback = EncodedFeedback{feedback->generation, feedback->acquired};
-        Positions mux{}, q{}, dq{};
-        if (feedback->frame.joints.position.size() != 29 ||
-            feedback->frame.joints.velocity.size() != 29) {
-          throw std::runtime_error("Reference feedback dimensions");
-        }
-        std::copy_n(target->target.points[0].positions.begin(), 29, mux.begin());
-        std::copy_n(feedback->frame.joints.position.begin(), 29, q.begin());
-        std::copy_n(feedback->frame.joints.velocity.begin(), 29, dq.begin());
-        try {
-          auto report = encode_reference(mux, q, dq, feedback->mode_machine, target->gain_profile,
-                                         target->model_id, target->execution_profile,
-                                         target->command_semantics, frozen_reference_budget());
-          saturation_watch_.check(report, Clock::now(), frozen_reference_budget());
-          prepared.command = report.command;
-          for (size_t i = 0; i < 29; ++i) {
-            projection_events_ += report.projected[i];
-            saturation_samples_ += report.saturated[i];
-            peak_compensation_ = std::max(peak_compensation_, std::abs(report.compensation[i]));
-            peak_total_effort_ = std::max(peak_total_effort_, std::abs(report.encoded_effort[i]));
-          }
-          if (reference_trace_) {
-            reference_trace_ << std::setprecision(17) << "{\"epoch\":" << target->epoch
-                             << ",\"seq\":" << target->seq
-                             << ",\"model\":" << std::quoted(target->model_id)
-                             << ",\"profile\":" << std::quoted(target->execution_profile);
-            const auto values = [this](const char* label, const auto& data) {
-              reference_trace_ << ",\"" << label << "\":[";
-              for (size_t i = 0; i < 29; ++i) {
-                if (i) reference_trace_ << ',';
-                reference_trace_ << data[i];
-              }
-              reference_trace_ << ']';
-            };
-            values("mux_reference", report.mux_reference);
-            values("sdk_position", report.sdk_position);
-            values("compensation", report.compensation);
-            values("virtual_effort", report.virtual_effort);
-            values("encoded_effort", report.encoded_effort);
-            values("projected", report.projected);
-            values("saturated", report.saturated);
-            values("measured_q", q);
-            values("measured_dq", dq);
-            reference_trace_ << "}\n";
-          }
-        } catch (const std::exception& error) {
-          throw std::runtime_error(std::string("Reference budget/encoding: ") + error.what());
-        }
-      }
-      return prepared;
-    };
-    const auto result = guarded_send<LowCommand>(
-        request, [] { return Clock::now(); }, observe, encode,
-        [this](const LowCommand& packet) { return transport_.write(packet); });
-    if (!result.written()) {
-      switch (result.status) {
-        case SendStatus::DeadlineExpired:
-        case SendStatus::DampingExpired:
-        case SendStatus::Revoked:
-        case SendStatus::FeedbackChanged:
-          return false;
-        case SendStatus::RemoteStop:
-          stop_local("RC stop immediately before SDK write", false);
-          return false;
-        default:
-          break;
-      }
-      stop_local("SDK send gate status=" + std::to_string(static_cast<int>(result.status)) + " " +
-                     result.detail,
-                 true);
-      if (result.phase == SendPhase::BeforeEncoding && sampled)
-        write_command(encode_damping(sampled->mode_machine), Clock::now(), nullptr, true);
-      return false;
-    }
-    now = result.completed_at;
-    ++sdk_writes_;
-    if (first_write_ == Clock::time_point{}) first_write_ = now;
-    final_write_ = now;
-    if (last_write_ != Clock::time_point{}) {
-      const double gap = std::chrono::duration<double, std::milli>(now - last_write_).count();
-      max_write_gap_ms_ = std::max(max_write_gap_ms_, gap);
-      sdk_gaps_ms_.push_back(gap);
-    }
-    last_write_ = now;
-    if (target) {
-      ++active_writes_;
-      run_acceptance_.sdk_write(now, target->phase == Target::TARGET_ACTIVE, target->model_id,
-                                target->epoch);
-      if (published_.instance != target->mc_instance_id ||
-          published_.request != target->request_id || published_.epoch != target->epoch)
-        published_ = Receipt{target->mc_instance_id, target->request_id, target->epoch, 0, 0};
-      published_.seq = target->seq;
-      published_.mask |= target->phase;
-      maybe_complete();
-    } else {
-      run_acceptance_.break_tail();
-      saturation_watch_.reset();
-      if (damping)
-        ++damping_writes_;
-      else
-        ++local_writes_;
-    }
-    return true;
-  }
-  void tick(Clock::time_point now) {
-    ++loop_ticks_;
-    auto sample = transport_.sample();
-    const auto rc = transport_.remote();
-    const auto odometry = transport_.odometry();
-    const bool fresh = sample && now - sample->acquired <= 40ms;
-    const bool rc_fresh = rc.valid && now - rc.acquired <= 250ms;
-    if (!sample) {
-      if (now - started_ > 5s && !terminal_failure_)
-        stop_local("No validated SDK state within startup deadline", true);
-      return;
-    }
-    if (control_.authorized()) {
-      if (!fresh)
-        stop_local("Native state age exceeded 40 ms", true);
-      else if (!rc_fresh)
-        stop_local("Remote age exceeded 250 ms", true);
-      else if (transport_.bad_packets() != bad_baseline_)
-        stop_local("Invalid SDK feedback/remote packet", true);
-      else if (transport_.resets() != reset_baseline_)
-        stop_local("SDK tick reset during authorization", true);
-      else if (target_sub_->get_publisher_count() > 1)
-        stop_local("Multiple MC target publishers", true);
-    }
-    const auto intent = remote_edges_.update(rc);
-    if (rc_fresh && !intent.stop) commands_.update(intent);
-    if (intent.stop && control_.authorized()) stop_local("RC stop", false);
-    if (intent.x && fresh && rc_fresh && !terminal_failure_) {
-      if (control_.mode() == ExecutionMode::Disarmed) {
-        if (tilt(sample->frame) > .7)
-          stop_local("Cannot authorize a tilted initial pose", true);
-        else {
-          Positions measured{};
-          std::copy_n(sample->frame.joints.position.begin(), 29, measured.begin());
-          for (size_t i = 0; i < 29; ++i)
-            if (measured[i] < lower_limits()[i] || measured[i] > upper_limits()[i])
-              throw std::runtime_error("Initial measured pose outside bounds: " + joint_names()[i] +
-                                       " q=" + std::to_string(measured[i]));
-          bad_baseline_ = transport_.bad_packets();
-          reset_baseline_ = transport_.resets();
-          commands_ = MotionCommand{};
-          control_.stand(measured, now);
-          ++send_generation_;
-          RCLCPP_INFO(get_logger(),
-                      "RC authorized measured-pose alignment; inference remains disabled");
-        }
-      } else if (control_.mode() == ExecutionMode::Hold && !zero(mc_instance_))
-        start_request("asap_loco");
-    }
-    if (intent.mimic && have_request_ && completion_counted_ &&
-        control_.mode() == ExecutionMode::Active)
-      start_request("asap_cr7");
-    else if (intent.loco && have_request_ && completion_counted_ &&
-             control_.mode() == ExecutionMode::Active)
-      start_request("asap_loco");
-    else if (intent.reset && have_request_ && completion_counted_ &&
-             control_.mode() == ExecutionMode::Active)
-      start_request(request_.target_model);
-    if (generation_ != sample->generation) {
-      generation_ = sample->generation;
-      ++state_seq_;
-      native_ = sample;
-      fill_frame(*sample, rc, odometry, now);
-      gate_.state(frame_, sample->acquired);
-      pub_->publish(frame_);
-    }
-    send_request(now);
-    if (have_request_ && !terminal_failure_) {
-      health_.tick(now, gate_.live(now), confirmation_.active());
-      if (health_.failed())
-        stop_local("Target TTL or inference transaction deadline expired", true);
-    }
-    if (control_.authorized()) {
-      const double angle = tilt(sample->frame);
-      if (control_.mode() == ExecutionMode::Active) {
-        max_tilt_ = std::max(max_tilt_, angle);
-        if (odometry.valid && now - odometry.acquired <= 100ms)
-          min_height_ = std::min(min_height_, static_cast<double>(odometry.position[2]));
-      }
-      if (angle > 1.0 ||
-          (odometry.valid && now - odometry.acquired <= 100ms && odometry.position[2] < .3))
-        stop_local("Simulation posture criterion failed", true);
-    }
-    if (control_.authorized() && fresh && rc_fresh) {
-      if (have_request_ && target_ && gate_.live(now)) {
-        // Recheck the monotonic target deadline immediately before the SDK write.
-        const LowCommand command{};
-        if (!gate_.live(Clock::now()))
-          stop_local("Target expired before SDK write", true);
-        else {
-          control_.active();
-          write_command(command, now, &*target_, false);
-        }
-      } else if (control_.mode() == ExecutionMode::Aligning ||
-                 control_.mode() == ExecutionMode::Hold ||
-                 (control_.mode() == ExecutionMode::Preparing && !preparing_damp_)) {
-        write_command(encode_position(control_.local_target(now), sample->mode_machine,
-                                      gain_profile_, "asap_loco"),
-                      now, nullptr, false);
-      } else {
-        write_command(encode_damping(sample->mode_machine), now, nullptr, true);
-      }
-    } else if (control_.damping(now)) {
-      write_command(encode_damping(sample->mode_machine), now, nullptr, true);
-    } else {
-      last_write_ = {};
-    }
-    control_.settle(now);
-    if (telemetry_ && loop_ticks_ % 10 == 0) {
-      telemetry_ << std::setprecision(10) << std::chrono::duration<double>(now - started_).count()
-                 << ',' << sample->frame.sdk_tick << ',' << state_seq_ << ',' << epoch_ << ','
-                 << static_cast<int>(control_.mode()) << ',' << gate_.accepted_seq() << ','
-                 << published_.seq << ',' << sdk_writes_ << ',' << tilt(sample->frame) << ','
-                 << (odometry.valid ? odometry.position[2] : -1.f) << ','
-                 << std::chrono::duration<double, std::milli>(now - sample->acquired).count() << ','
-                 << (rc.valid ? std::chrono::duration<double, std::milli>(now - rc.acquired).count()
-                              : -1.)
-                 << '\n';
-    }
-  }
-  void finish(bool natural_completion) {
-    active_seconds_ = run_acceptance_.tail_seconds();
-    bool passed =
-        natural_completion && !terminal_failure_ && control_.mode() == ExecutionMode::Active &&
-        run_acceptance_.sequence_matches(expected_modes_) && active_seconds_ >= min_active_ &&
-        accepted_ >= 10 && min_height_ < 100. && published_active() && target_ &&
-        target_->phase == Target::TARGET_ACTIVE && target_->model_id == request_.target_model &&
-        gate_.live(Clock::now()) && confirmation_.active();
-    // Stop is independent of ROS reception or any MC acknowledgement.
-    ++send_generation_;
-    gate_.stop();
-    target_.reset();
-    if (control_.authorized() && native_) {
-      const auto stop_start = Clock::now();
-      control_.stop(stop_start, false);
-      DeadlineSchedule schedule(stop_start, 100ms);
-      while (!schedule.done(Clock::now())) {
-        std::this_thread::sleep_until(schedule.next());
-        const auto now = Clock::now();
-        if (!schedule.due(now)) continue;
-        write_command(encode_damping(native_->mode_machine), now, nullptr, true, schedule.end());
-      }
-    }
-    passed = passed && !terminal_failure_;
-    if (telemetry_) telemetry_.flush();
-    if (reference_trace_) reference_trace_.flush();
-    std::sort(sdk_gaps_ms_.begin(), sdk_gaps_ms_.end());
-    const auto percentile = [this](double p) {
-      if (sdk_gaps_ms_.empty()) return 0.;
-      return sdk_gaps_ms_[static_cast<size_t>(p * (sdk_gaps_ms_.size() - 1))];
-    };
-    const double write_span = std::chrono::duration<double>(final_write_ - first_write_).count();
-    const double write_hz = write_span > 0 ? static_cast<double>(sdk_writes_ - 1) / write_span : 0.;
-    std::ostringstream summary;
-    summary << std::boolalpha << std::setprecision(12) << "{\n  \"success\": " << passed
-            << ",\n  \"backend\": \"unitree_loopback_sim\",\n"
-            << "  \"sdk_publication_is_physical_execution\": false,\n"
-            << "  \"accepted_targets\": " << accepted_ << ",\n  \"rejected_targets\": " << rejected_
-            << ",\n  \"completed_modes\": " << completed_modes_
-            << ",\n  \"active_seconds\": " << active_seconds_
-            << ",\n  \"target_active_total_seconds\": " << run_acceptance_.total_seconds()
-            << ",\n  \"sdk_writes\": " << sdk_writes_
-            << ",\n  \"policy_sdk_writes\": " << active_writes_
-            << ",\n  \"local_sdk_writes\": " << local_writes_
-            << ",\n  \"damping_sdk_writes\": " << damping_writes_
-            << ",\n  \"writer_ticks\": " << loop_ticks_
-            << ",\n  \"skipped_2ms_periods\": " << skipped_periods_
-            << ",\n  \"max_scheduling_lateness_ms\": " << max_lateness_ms_
-            << ",\n  \"max_sdk_write_gap_ms\": " << max_write_gap_ms_
-            << ",\n  \"minimum_active_pelvis_height\": " << min_height_
-            << ",\n  \"maximum_active_tilt_rad\": " << max_tilt_
-            << ",\n  \"sdk_write_mean_hz\": " << write_hz
-            << ",\n  \"sdk_write_gap_p50_ms\": " << percentile(.5)
-            << ",\n  \"sdk_write_gap_p99_ms\": " << percentile(.99)
-            << ",\n  \"terminal_failure\": " << terminal_failure_
-            << ",\n  \"failure\": " << std::quoted(failure_)
-            << ",\n  \"last_rejection\": " << std::quoted(last_reject_) << "\n}\n";
-    if (!result_path_.empty()) {
-      std::ofstream execution(result_path_ + ".execution.json");
-      execution << "{\"profile\":" << std::quoted(execution_profile_)
-                << ",\"command_semantics\":" << static_cast<int>(command_semantics_)
-                << ",\"projection_events\":" << projection_events_
-                << ",\"saturation_samples\":" << saturation_samples_
-                << ",\"peak_compensation_nm\":" << peak_compensation_
-                << ",\"peak_expected_effort_nm\":" << peak_total_effort_ << "}\n";
-      std::ofstream sequence(result_path_ + ".model-sequence.json");
-      sequence << '[';
-      bool first = true;
-      for (const auto& entry : run_acceptance_.models()) {
-        if (!first) sequence << ',';
-        first = false;
-        sequence << "{\"model\":" << std::quoted(entry.model) << ",\"epoch\":" << entry.epoch
-                 << '}';
-      }
-      sequence << "]\n";
-    }
-    if (!result_path_.empty()) {
-      std::ofstream result(result_path_);
-      result << summary.str();
-    }
-    RCLCPP_INFO(get_logger(),
-                "NATIVE_RESULT success=%s active_seconds=%.3f policy_writes=%lu sdk_writes=%lu "
-                "accepted=%lu rejected=%lu modes=%d skipped=%lu failure=%s",
-                passed ? "true" : "false", active_seconds_, active_writes_, sdk_writes_, accepted_,
-                rejected_, completed_modes_, skipped_periods_, failure_.c_str());
-    success = passed;
-    completed = true;
   }
   void run() {
-    bool natural_completion = false;
+    // Both terminal and SDL are created/polled/destroyed on this owning thread.
+    std::unique_ptr<TerminalKeyboard> keyboard;
+    std::unique_ptr<SdlGamepad> gamepad;
+    try {
+      if (enabled(InputSource::Keyboard) && isatty(STDIN_FILENO)) keyboard = std::make_unique<TerminalKeyboard>();
+      if (enabled(InputSource::Gamepad)) gamepad = std::make_unique<SdlGamepad>(configuration_.inputs.gamepad_device_index);
+    } catch (const std::exception& error) {
+      RCLCPP_WARN(get_logger(), "Input unavailable: %s", error.what());
+    }
     PeriodicSendSchedule schedule(Clock::now());
     while (!stopping_ && rclcpp::ok()) {
       std::this_thread::sleep_until(schedule.next());
       const auto now = Clock::now();
-      const auto slot = schedule.consume(now);
-      if (!slot.due) continue;
-      max_lateness_ms_ = std::max(max_lateness_ms_,
-                                  std::chrono::duration<double, std::milli>(slot.lateness).count());
-      skipped_periods_ += slot.skipped;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        try {
-          tick(now);
-        } catch (const std::exception& error) {
-          stop_local(error.what(), true);
+      if (!schedule.consume(now).due) continue;
+      try {
+        if (keyboard) inputs_.submit(keyboard->poll(now));
+        if (gamepad) inputs_.submit(gamepad->poll(now));
+        auto input = inputs_.poll(now);
+        auto sample = transport_.sample();
+        const auto odometry = transport_.odometry();
+        const auto remote = transport_.remote();
+        if (sample) {
+          sample->frame.header.frame_id = configuration_.mode.transport.base_frame;
+          sample->frame.joints.header = sample->frame.header;
+          sample->frame.imu.header = sample->frame.header;
         }
-      }
-      if (std::chrono::duration<double>(now - started_).count() >= duration_) {
-        natural_completion = true;
-        break;
+        if (sample && odometry.valid && now >= odometry.acquired && now - odometry.acquired <= 100ms) {
+          sample->frame.odometry.header.stamp = odometry.stamp;
+          sample->frame.odometry.header.frame_id = configuration_.mode.transport.odometry_frame;
+          sample->frame.odometry.child_frame_id = sample->frame.header.frame_id;
+          sample->frame.odometry.pose.pose.position.x = odometry.position[0];
+          sample->frame.odometry.pose.pose.position.y = odometry.position[1];
+          sample->frame.odometry.pose.pose.position.z = odometry.position[2];
+          sample->frame.odometry.pose.pose.orientation = sample->frame.imu.orientation;
+          const auto velocity = world_to_body(sample->frame.imu.orientation, odometry.velocity);
+          sample->frame.odometry.twist.twist.linear.x = velocity[0];
+          sample->frame.odometry.twist.twist.linear.y = velocity[1];
+          sample->frame.odometry.twist.twist.linear.z = velocity[2];
+          sample->frame.odometry.twist.twist.angular = sample->frame.imu.angular_velocity;
+          sample->frame.validity |= Frame::VALID_ODOMETRY;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sample) controller_->feedback(*sample);
+        if (transport_.bad_packets() != bad_packets_) {
+          bad_packets_ = transport_.bad_packets();
+          controller_->feedback_fault("Malformed native feedback or remote packet");
+        }
+        if (targets_->get_publisher_count() > 1) controller_->feedback_fault("Multiple MC target publishers");
+        const auto plan = controller_->tick(input);
+        if (controller_->diagnostic() != last_diagnostic_) {
+          last_diagnostic_ = controller_->diagnostic();
+          if (!last_diagnostic_.empty()) RCLCPP_WARN(get_logger(), "%s", last_diagnostic_.c_str());
+        }
+        const auto authority_detail = backend_->authority_diagnostic();
+        if (authority_detail != last_authority_diagnostic_) {
+          last_authority_diagnostic_ = authority_detail;
+          if (!authority_detail.empty()) RCLCPP_INFO(get_logger(), "Authority %s", authority_detail.c_str());
+        }
+        if (plan.decision == Decision::Accepted && plan.before.state != plan.after.state)
+          RCLCPP_INFO(get_logger(), "Env state=%s requested=%s generation=%lu",
+              to_string(plan.after.state).c_str(), to_string(plan.after.requested_state).c_str(), plan.after.generation);
+        if (auto frame = controller_->take_frame(input.snapshot)) {
+          if (remote.valid && now >= remote.acquired && now - remote.acquired <= configuration_.mode.guards.input_timeout) {
+            frame->remote.header.stamp = remote.stamp;
+            frame->remote.header.frame_id = frame->header.frame_id;
+            frame->remote.axes.assign(remote.axes.begin(), remote.axes.end());
+            for (size_t i = 0; i < 16; ++i) frame->remote.buttons.push_back((remote.keys >> i) & 1u);
+            frame->validity |= Frame::VALID_RC;
+          }
+          publisher_->publish(*frame);
+        }
+        send_request(now);
+      } catch (const std::exception& error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        controller_->feedback_fault(error.what());
       }
     }
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      finish(natural_completion);
-    }
-    if (rclcpp::ok()) rclcpp::shutdown();
+    std::lock_guard<std::mutex> lock(mutex_);
+    try { controller_->shutdown(); }
+    catch (const std::exception& error) { RCLCPP_ERROR(get_logger(), "Shutdown release failed: %s", error.what()); }
   }
 };
 }  // namespace anakin::env
+
 int main(int argc, char** argv) {
   try {
-    rclcpp::init(argc, argv);
-    auto node = std::make_shared<anakin::env::NativeNode>();
-    rclcpp::spin(node);
-    return node->completed ? (node->success ? 0 : 1) : 130;
+    std::vector<std::string> arguments(argv, argv + argc);
+    const auto options = anakin::env::parse_startup(arguments);
+    auto configuration = anakin::env::load_configuration(options.mode, options.resources);
+    if (configuration.inputs.primary == anakin::env::InputSource::Keyboard && !isatty(STDIN_FILENO))
+      throw std::runtime_error("Keyboard primary requires a foreground terminal or SSH PTY");
+    const auto domain = std::to_string(configuration.mode.transport.ros_domain);
+    if (setenv("ROS_DOMAIN_ID", domain.c_str(), 1) != 0) throw std::runtime_error("Cannot set configured ROS domain");
+    auto ros_arguments = options.ros_arguments;
+    std::vector<char*> ros_argv;
+    for (auto& argument : ros_arguments) ros_argv.push_back(argument.data());
+    rclcpp::init(static_cast<int>(ros_argv.size()), ros_argv.data());
+    rclcpp::spin(std::make_shared<anakin::env::NativeNode>(std::move(configuration)));
+    rclcpp::shutdown();
+    return 0;
   } catch (const std::exception& error) {
-    std::cerr << "anakin_env_native: " << error.what() << '\n';
+    std::cerr << "anakin_env: " << error.what() << '\n';
     if (rclcpp::ok()) rclcpp::shutdown();
     return 1;
   }

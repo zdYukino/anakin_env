@@ -1,3 +1,5 @@
+> 历史记录：本文旧入口、参数和验收状态保留当时事实。当前运行请以[独立运行说明](standalone-operation.md)为准；正常入口默认 real，旧 `--loopback-sim` 已拒绝。
+
 > Later communication-free send P2 work and the still-open full-path budget P1 are recorded in [send-p2-checkpoint.md](send-p2-checkpoint.md). This file preserves the preceding v3 checkpoint.
 
 # PD_REFERENCE finite checkpoint, 2026-10-27 15:58 UTC

@@ -1,0 +1,45 @@
+schema_version: 1
+primary: keyboard
+enabled_sources: [keyboard, gamepad, remote]
+keyboard: {command_timeout_ms: 250}
+gamepad: {device_index: 0}
+remote: {channel: lowstate}
+motion:
+  deadzone: 0.04
+  velocity_axes:
+    forward: {axis: left_y, scale: 0.5}
+    lateral: {axis: left_x, scale: -0.5}
+    yaw: {axis: right_x, scale: -1.0}
+  initial_height: 0.78
+  height_step: 0.05
+keyboard_bindings:
+  - {key: '1', trigger: pressed, action: disarmed}
+  - {key: '2', trigger: pressed, action: emergency_stop}
+  - {key: Space, trigger: pressed, action: emergency_stop}
+  - {key: '3', trigger: pressed, action: align}
+  - {key: '4', trigger: pressed, action: hold}
+  - {key: '5', trigger: pressed, action: asap_loco}
+  - {key: '6', trigger: pressed, action: asap_cr7}
+  - {key: C, trigger: pressed, action: clear_fault}
+  - {key: W, trigger: pressed, action: forward}
+  - {key: S, trigger: pressed, action: backward}
+  - {key: A, trigger: pressed, action: left}
+  - {key: D, trigger: pressed, action: right}
+  - {key: Q, trigger: pressed, action: turn_left}
+  - {key: E, trigger: pressed, action: turn_right}
+  - {key: G, trigger: pressed, action: motion_toggle}
+  - {key: Up, trigger: pressed, action: height_up}
+  - {key: Down, trigger: pressed, action: height_down}
+# This one logical controller map is shared by SDL gamepads and Unitree remotes.
+controller_bindings:
+  - {button: Down, shoulders: [L1, R1], trigger: pressed, action: disarmed}
+  - {button: A, shoulders: any, trigger: held, action: emergency_stop}
+  - {button: B, shoulders: any, trigger: held, action: emergency_stop}
+  - {button: X, shoulders: [L1, R1], trigger: pressed, action: align}
+  - {button: Up, shoulders: [L1, R1], trigger: pressed, action: hold}
+  - {button: Down, shoulders: [R1], trigger: pressed, action: asap_loco}
+  - {button: Up, shoulders: [R1], trigger: pressed, action: asap_cr7}
+  - {button: Y, shoulders: [L1, R1], trigger: pressed, action: clear_fault}
+  - {button: Left, shoulders: [], trigger: pressed, action: motion_toggle}
+  - {button: Up, shoulders: [], trigger: pressed, action: height_up}
+  - {button: Down, shoulders: [], trigger: pressed, action: height_down}

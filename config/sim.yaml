@@ -1,0 +1,72 @@
+schema_version: 1
+mode: sim
+initial_state: disarmed
+transport: {interface: lo, sdk_domain: 31, ros_domain: 87, odometry_topic: rt/sportmodestate, base_frame: unitree_sim_base, odometry_frame: unitree_sim_world}
+guards:
+  allow_fallen: true
+  fault_on_tick_rollback: false
+  require_primary_input: false
+  strict_deadlines: false
+  enforce_measured_joint_limits: false
+  max_tilt_radians: 1.0
+  min_base_height: 0.3
+  state_timeout_ms: 40
+  input_timeout_ms: 250
+  source_loss: zero_motion_keep_mode
+timing: {alignment_seconds: 2.0, damping_seconds: 0.1, authority_timeout_ms: 3000, policy_timeout_ms: 5000}
+states:
+  disarmed:
+    outputs: {ros_state: true, lowcmd: false}
+    command: none
+    on_enter: [revoke_actuation, release_if_owned]
+    on_exit: []
+  damping:
+    outputs: {ros_state: true, lowcmd: true}
+    command: damping
+    on_enter: [revoke_actuation]
+    on_exit: []
+  align:
+    outputs: {ros_state: true, lowcmd: true}
+    command: stand_interpolation
+    on_enter: [revoke_actuation, begin_alignment]
+    on_exit: []
+  hold:
+    outputs: {ros_state: true, lowcmd: true}
+    command: fixed_stand
+    on_enter: [revoke_actuation]
+    on_exit: []
+  asap_loco:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    model: asap_loco
+    on_enter: []
+    on_exit: []
+  asap_cr7:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    model: asap_cr7
+    on_enter: []
+    on_exit: []
+  preparing:
+    outputs: {ros_state: true, lowcmd: true}
+    command: policy
+    preparing_fallback: {from_hold: fixed_stand, otherwise: damping}
+    on_enter: [revoke_actuation, request_policy]
+    on_exit: []
+  fault:
+    outputs: {ros_state: true, lowcmd: false}
+    command: none
+    on_enter: [revoke_actuation, release_if_owned]
+    on_exit: []
+manual_transitions:
+  - {from: '*', to: [disarmed, damping, align, hold]}
+  - {from: '*', to: [asap_loco, asap_cr7], via: preparing}
+automatic_transitions:
+  - {from: align, event: alignment_complete, to: hold}
+  - {from: preparing, event: policy_ready, to: requested}
+  - {from: asap_cr7, event: motion_done, to: asap_loco, via: preparing}
+system_transitions:
+  - {from: '*', event: emergency_stop, to: damping}
+  - {from: '*', event: fault, to: fault}
+  - {from: fault, event: fault, to: fault}
+  - {from: fault, event: clear_fault, to: disarmed}

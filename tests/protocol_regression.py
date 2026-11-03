@@ -17,7 +17,7 @@ def main():
             fixture=subprocess.Popen([str(prefix/"lib/anakin_env/anakin_env_protocol_fixture"),"--ros-args","-p",f"fault:={case}"],env=env,stdout=fixture_log,stderr=subprocess.STDOUT)
             node=None
             try:
-                node=subprocess.Popen([str(ws.parent/"anakin_env/en_run.sh"),"-p","duration:=3.5","-p",f"demo_switch:={'true' if case=='normal' else 'false'}"],env=env,stdout=node_log,stderr=subprocess.STDOUT)
+                node=subprocess.Popen([str(prefix/"lib/anakin_env/anakin_env_node"),"--ros-args","-p","duration:=3.5","-p",f"demo_switch:={'true' if case=='normal' else 'false'}"],env=env,stdout=node_log,stderr=subprocess.STDOUT)
                 code=node.wait(timeout=8)
                 if code!=expected_code:raise RuntimeError(f"{case}: exit {code}, expected {expected_code}")
             finally:

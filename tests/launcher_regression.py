@@ -14,7 +14,7 @@ def main():
     children=[];launcher=None
     with log.open("w") as out:
         try:
-            launcher=subprocess.Popen([str(ws/"en_run.sh")],env=env,stdout=out,stderr=subprocess.STDOUT)
+            launcher=subprocess.Popen([str(ws.parent/"anakin_env/scripts/integration_run.sh"),"--offline-test"],env=env,stdout=out,stderr=subprocess.STDOUT)
             mc=None;deadline=time.monotonic()+5
             while time.monotonic()<deadline and launcher.poll() is None:
                 child_file=Path(f"/proc/{launcher.pid}/task/{launcher.pid}/children")
