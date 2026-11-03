@@ -37,7 +37,7 @@ def main():
         if args.workspace_entry:
             require(not args.workspace_entry.is_symlink(), "Workspace entry must replace the old fixture alias")
             shutil.copy2(args.workspace_entry, ws / "em_run.sh")
-        sdk = ws / "install/anakin_sdk"
+        sdk = root / "anakin_sdk/install/anakin_sdk"
         sdk_metadata = sdk / "share/anakin_sdk/cmake/revision.cmake"
         sdk_metadata.parent.mkdir(parents=True)
         sdk_metadata.write_text(f'set(ANAKIN_SDK_REVISION "{revision}")\n')
@@ -47,6 +47,10 @@ def main():
         capture = root / "capture"
         models = root / "model.onnx"
         models.touch()
+        ort = mc / ".deps/onnxruntime-linux-x64-1.20.1"
+        (ort / "lib").mkdir(parents=True)
+        (ort / "lib/libonnxruntime.so.1").touch()
+        (ort / "VERSION_NUMBER").write_text("1.20.1\n")
         standalone = repo / "install/anakin_env"
         shared = ws / "install/anakin_env"
         explicit = root / "explicit Env"
@@ -74,7 +78,9 @@ def main():
             install(selected_mc, "anakin_mc", ("anakin_mc_node",))
         environment = os.environ.copy()
         # No host prefix, overlay or model selection may affect these captures.
-        for key in ("ANAKIN_PREFIX", "ANAKIN_SDK_PREFIX", "ANAKIN_WS", "ROS_DOMAIN_ID"):
+        for key in ("ANAKIN_PREFIX", "ANAKIN_SDK_PREFIX", "ANAKIN_WS", "ROS_DOMAIN_ID",
+                    "ANAKIN_LAUNCH_CHECK_ONLY", "ROS_PREFIX", "ROS_DISTRO", "ONNXRUNTIME_ROOT",
+                    "ANAKIN_ASSETS", "ROS_LOG_DIR"):
             environment.pop(key, None)
         environment.update(ANAKIN_WS=str(ws), ANAKIN_CAPTURE=str(capture),
                            AMENT_PREFIX_PATH="/unrelated/overlay", LD_LIBRARY_PATH="/unrelated/lib",
@@ -124,8 +130,9 @@ def main():
             require(argv[0] == str(standalone / "lib/anakin_env/anakin_env_native_node"), "Workspace forwards normal package selection")
         moved = standalone.with_name("saved")
         standalone.rename(moved)
-        argv, _ = run(entry, ["--sim"])
-        require(argv[0] == str(shared / "lib/anakin_env/anakin_env_native_node"), "Workspace install fallback when no standalone install exists")
+        run(entry, ["--sim"], error=True)
+        argv, _ = run(entry, ["--sim"], {"ANAKIN_PREFIX": str(shared)})
+        require(argv[0] == str(shared / "lib/anakin_env/anakin_env_native_node"), "Shared installation requires an explicit prefix")
         moved.rename(standalone)
         for arguments in (["--loopback-sim"], ["--sim", "--real"], ["--real", "--real"], ["--sim", "--sim"],
                           ["--input"], ["--input", "unknown"], ["--config"], ["--input-config"], ["--unknown"],
@@ -182,8 +189,9 @@ def main():
             require(argv[1:] == ["--ros-args", "-p", f"loco_model:={models}", "-p", f"mimic_model:={models}"], "MC model forwarding")
             saved_mc = mc_prefix.with_name("saved")
             mc_prefix.rename(saved_mc)
-            argv, _ = run(mc / "em_run.sh")
-            require(argv[0] == str(mc_shared / "lib/anakin_mc/anakin_mc_node"), "MC workspace fallback when standalone is absent")
+            run(mc / "em_run.sh", error=True)
+            argv, _ = run(mc / "em_run.sh", overrides={"ANAKIN_PREFIX": str(mc_shared)})
+            require(argv[0] == str(mc_shared / "lib/anakin_mc/anakin_mc_node"), "MC shared install requires an explicit prefix")
             saved_mc.rename(mc_prefix)
             argv, _ = run(mc / "em_run.sh", overrides={"ANAKIN_PREFIX": str(mc_explicit)})
             require(argv[0] == str(mc_explicit / "lib/anakin_mc/anakin_mc_node"), "MC explicit install selection")

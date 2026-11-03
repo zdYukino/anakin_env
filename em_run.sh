@@ -2,6 +2,11 @@
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")" && pwd)
 source "$repo/scripts/launch_common.sh"
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+ echo 'Usage: ./em_run.sh [--sim|--real] [--config PATH] [--input-config PATH] [--input keyboard|gamepad|remote] [--ros-args ...]'
+ echo 'Starts Env only (default real). ANAKIN_PREFIX and ANAKIN_SDK_PREFIX select installations.'
+ exit 0
+fi
 # Keep shell preflight aligned with parse_startup; no process starts on a CLI error.
 arguments=("$@")
 declare -A seen=()
@@ -27,4 +32,6 @@ while (( $# )); do
 done
 select_env_binary anakin_env_native_node
 if [[ -z "$mode" ]]; then arguments=(--real "${arguments[@]}"); fi
+if [[ ${ANAKIN_LAUNCH_CHECK_ONLY:-0} == 1 ]]; then exit 0; fi
+mkdir -p -- "$ROS_LOG_DIR"
 exec "$binary" "${arguments[@]}"
