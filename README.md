@@ -15,9 +15,9 @@ ANAKIN_SDK_PREFIX=/path/to/sdk/install/anakin_sdk ./build.sh
 ## 运行
 
 ```sh
-./en_run.sh                         # 默认 real：只启动原生 Env
-./en_run.sh --real --input remote   # 实机；先配置明确的机器人网卡
-./en_run.sh --sim --input keyboard  # 显式仿真；MC、官方模拟器分别启动
+./em_run.sh                         # 默认 real：只启动原生 Env
+./em_run.sh --real --input remote   # 实机；先配置明确的机器人网卡
+./em_run.sh --sim --input keyboard  # 显式仿真；MC、官方模拟器分别启动
 ```
 
 完整操作步骤、端点、配置覆盖、键位、状态/输出表和用户验收边界见[独立运行说明](docs/standalone-operation.md)。旧 `--loopback-sim` 已移除并明确拒绝。正常入口不启动 MC、模拟器或测试夹具，不自动 reset；MC/Env 持续等待所需的新数据。
@@ -30,13 +30,13 @@ Env 使用一个 YAML 状态引擎、共用输入映射和共同 SDK PD 编码�
 
 ```mermaid
 flowchart LR
-    Launch[en_run.sh 默认 real / 显式 sim] --> Native[原生 Env]
+    Launch[em_run.sh 默认 real / 显式 sim] --> Native[原生 Env]
     Inputs[键盘 / SDL / Unitree 共用映射] --> Native
     Config[选定安装内 YAML] --> Native
     Native <-->|ROS 状态 / 事务 / 目标| MC[独立 MC]
     Native <-->|HG LowState / LowCmd| Backend[官方模拟器或 G1]
 ```
 
-代码依据：[入口](en_run.sh)、[配置/状态机](src/state_machine.cpp)、[生产控制器](src/runtime.cpp)、[原生节点](src/native_node.cpp)、[传输](src/transport.cpp)、[异步实机权限](src/authority.cpp)、[安装规则](CMakeLists.txt)。显式无 SDK 的 ROS 夹具保留在 [integration_run.sh](scripts/integration_run.sh) 的测试路由中。
+代码依据：[入口](em_run.sh)、[配置/状态机](src/state_machine.cpp)、[生产控制器](src/runtime.cpp)、[原生节点](src/native_node.cpp)、[传输](src/transport.cpp)、[异步实机权限](src/authority.cpp)、[安装规则](CMakeLists.txt)。显式无 SDK 的 ROS 夹具保留在 [integration_run.sh](scripts/integration_run.sh) 的测试路由中。
 
 [原生检查点](docs/native-checkpoint.md)与[后续审查记录](docs/review-fixes-20261027.md)保留历史证据。当前软件检查不代替用户实际仿真或硬件验收，尚未声称策略稳定性、物理停止或设备接管已通过硬件测试。

@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
                        run / "simulator.log", env);
     auto mc_env = env;
     mc_env["ANAKIN_PREFIX"] = (ws / "install/anakin_mc").string();
-    std::vector<std::string> mc_arguments{(base / "anakin_mc/en_run.sh").string()};
+    std::vector<std::string> mc_arguments{(base / "anakin_mc/em_run.sh").string()};
     if (trace_inference) {
       mc_arguments.push_back("-p");
       mc_arguments.push_back("trace_jsonl:=" + (run / "inference.jsonl").string());
@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
     auto env_env = env;
     env_env["ANAKIN_PREFIX"] = prefix.string();
     const auto plan = anakin::env::sim_test::make_plan(
-        prefix, run, base / "anakin_env/en_run.sh", sdk_domain, ros_domain, alignment_seconds);
+        prefix, run, base / "anakin_env/em_run.sh", sdk_domain, ros_domain, alignment_seconds);
     const auto node = children.spawn("env", plan.env_arguments, run / "env.log", env_env);
     const auto probe =
         children.spawn("probe",

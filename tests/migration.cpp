@@ -135,7 +135,7 @@ void plan_contract(const fs::path& source) {
   const auto run = temporary.path / "run";
   fs::create_directories(prefix / "share/anakin_env"); fs::create_directory(run);
   fs::copy(source, prefix / "share/anakin_env/config", fs::copy_options::recursive);
-  const auto plan = sim_test::make_plan(prefix, run, "/package/en_run.sh", 32, 89, .5);
+  const auto plan = sim_test::make_plan(prefix, run, "/package/em_run.sh", 32, 89, .5);
   const auto startup = parse_startup(plan.env_arguments);
   check(startup.mode == RuntimeMode::Sim && startup.resources.primary_input == InputSource::Remote &&
         startup.resources.config == plan.mode_config && startup.resources.input_config == plan.input_config,

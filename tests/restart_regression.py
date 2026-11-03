@@ -29,7 +29,7 @@ def main():
     server=None;node=None;sessions=[]
     with (out/"mc.log").open("w") as log:
         try:
-            server=subprocess.Popen([str(ws.parent/"anakin_mc/en_run.sh")],env=mc_env,stdout=log,stderr=subprocess.STDOUT)
+            server=subprocess.Popen([str(ws.parent/"anakin_mc/em_run.sh")],env=mc_env,stdout=log,stderr=subprocess.STDOUT)
             original_pid=server.pid
             for run in range(2):
                 with (out/f"env-{run}.log").open("w") as node_log:

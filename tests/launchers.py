@@ -29,14 +29,14 @@ def main():
         repo, mc, ws = [root / name for name in ("anakin_env", "anakin_mc", "anakin_cpp_ws")]
         repo.mkdir(); mc.mkdir(); ws.mkdir()
         (repo / "scripts").mkdir()
-        for relative in ("en_run.sh", "scripts/launch_common.sh", "scripts/integration_run.sh", "anakin_sdk.revision"):
+        for relative in ("em_run.sh", "scripts/launch_common.sh", "scripts/integration_run.sh", "anakin_sdk.revision"):
             shutil.copy2(args.env_source / relative, repo / relative)
         if args.mc_source:
-            for relative in ("en_run.sh", "anakin_sdk.revision"):
+            for relative in ("em_run.sh", "anakin_sdk.revision"):
                 shutil.copy2(args.mc_source / relative, mc / relative)
         if args.workspace_entry:
             require(not args.workspace_entry.is_symlink(), "Workspace entry must replace the old fixture alias")
-            shutil.copy2(args.workspace_entry, ws / "en_run.sh")
+            shutil.copy2(args.workspace_entry, ws / "em_run.sh")
         sdk = ws / "install/anakin_sdk"
         sdk_metadata = sdk / "share/anakin_sdk/cmake/revision.cmake"
         sdk_metadata.parent.mkdir(parents=True)
@@ -105,7 +105,7 @@ def main():
             require(values["ANAKIN_SDK_PREFIX"] == str(sdk), "Explicit coherent SDK prefix")
             return fields[:delimiter], values
 
-        entry = repo / "en_run.sh"
+        entry = repo / "em_run.sh"
         argv, values = run(entry)
         require(argv == [str(standalone / "lib/anakin_env/anakin_env_native_node"), "--real"], "Default real native-only entry")
         require(values["AMENT_PREFIX_PATH"].startswith(f"{sdk}:{standalone}:/opt/ros/humble"), "Selected library/resource order")
@@ -120,7 +120,7 @@ def main():
         argv, _ = run(entry, ["--sim"], {"ANAKIN_PREFIX": str(explicit), "ANAKIN_SDK_PREFIX": str(sdk)})
         require(argv[0] == str(explicit / "lib/anakin_env/anakin_env_native_node"), "Explicit selected prefix")
         if args.workspace_entry:
-            argv, _ = run(ws / "en_run.sh", ["--sim", "--input", "remote"])
+            argv, _ = run(ws / "em_run.sh", ["--sim", "--input", "remote"])
             require(argv[0] == str(standalone / "lib/anakin_env/anakin_env_native_node"), "Workspace forwards normal package selection")
         moved = standalone.with_name("saved")
         standalone.rename(moved)
@@ -177,27 +177,27 @@ def main():
         require(argv[0] == str(standalone / "lib/anakin_env/anakin_sim_runner") and
                 argv[1:] == ["--workspace", str(ws), "--duration", "17", "--rc-loss"], "Only explicit test route selects runner")
         if args.mc_source:
-            argv, _ = run(mc / "en_run.sh")
+            argv, _ = run(mc / "em_run.sh")
             require(argv[0] == str(mc_prefix / "lib/anakin_mc/anakin_mc_node"), "Actual MC standalone entry")
             require(argv[1:] == ["--ros-args", "-p", f"loco_model:={models}", "-p", f"mimic_model:={models}"], "MC model forwarding")
             saved_mc = mc_prefix.with_name("saved")
             mc_prefix.rename(saved_mc)
-            argv, _ = run(mc / "en_run.sh")
+            argv, _ = run(mc / "em_run.sh")
             require(argv[0] == str(mc_shared / "lib/anakin_mc/anakin_mc_node"), "MC workspace fallback when standalone is absent")
             saved_mc.rename(mc_prefix)
-            argv, _ = run(mc / "en_run.sh", overrides={"ANAKIN_PREFIX": str(mc_explicit)})
+            argv, _ = run(mc / "em_run.sh", overrides={"ANAKIN_PREFIX": str(mc_explicit)})
             require(argv[0] == str(mc_explicit / "lib/anakin_mc/anakin_mc_node"), "MC explicit install selection")
-            run(mc / "en_run.sh", overrides={"ANAKIN_PREFIX": str(root / "missing MC")}, error=True)
+            run(mc / "em_run.sh", overrides={"ANAKIN_PREFIX": str(root / "missing MC")}, error=True)
             mc_marker = mc_prefix / "share/ament_index/resource_index/packages/anakin_mc"
-            mc_marker.unlink(); run(mc / "en_run.sh", error=True); mc_marker.touch()
+            mc_marker.unlink(); run(mc / "em_run.sh", error=True); mc_marker.touch()
             lock = mc_prefix / "share/anakin_mc/runtime-sdk.revision"
-            lock.write_text(other_revision + "\n"); run(mc / "en_run.sh", error=True)
+            lock.write_text(other_revision + "\n"); run(mc / "em_run.sh", error=True)
             lock.write_text(revision + "\n")
             for text in bad_sdk_metadata:
                 sdk_metadata.write_text(text)
-                run(mc / "en_run.sh", error=True)
+                run(mc / "em_run.sh", error=True)
             sdk_metadata.write_text(f'# SDK build record\n\nset(ANAKIN_SDK_REVISION "{revision}")')
-            run(mc / "en_run.sh")
+            run(mc / "em_run.sh")
         print(f"PASS {invocations} launch captures/rejections; compiled stub ELFs only")
 
 

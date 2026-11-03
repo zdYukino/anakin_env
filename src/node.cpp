@@ -15,7 +15,7 @@ class Node final : public rclcpp::Node {
       throw std::runtime_error("No official /clock verified; use_sim_time must be false");
     if (declare_parameter<std::string>("backend", "offline_fixture") != "offline_fixture")
       throw std::runtime_error(
-          "This explicit fixture accepts only backend=offline_fixture; use en_run.sh for native Env");
+          "This explicit fixture accepts only backend=offline_fixture; use em_run.sh for native Env");
     if (declare_parameter<bool>("arm", false))
       throw std::runtime_error("Offline checkpoint cannot arm or publish SDK commands");
     duration_ = declare_parameter<double>("duration", 8.);

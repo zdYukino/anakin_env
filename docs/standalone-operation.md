@@ -22,17 +22,17 @@ ANAKIN_SDK_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_sdk ./bu
 
 MC 使用官方原生 ONNX Runtime 1.20.1；可用 `ONNXRUNTIME_ROOT` 指定其目录。`ANAKIN_LOCO_MODEL`、`ANAKIN_MIMIC_MODEL` 可显式指定现有 ONNX 文件，默认仍使用原来的模型。模型、动作缩放、历史和过渡算法未随本次模式配置改写。
 
-每个包的 `en_run.sh` 优先选择本仓库 `install/包名`；该目录不存在时选择共享工作区 `install/包名`。存在但损坏的独立安装会报错，不会静默改用另一个安装。`ANAKIN_PREFIX` 明确指定当前包的安装前缀，`ANAKIN_SDK_PREFIX` 指定 SDK，`ANAKIN_WS` 指定共享工作区。Env 与 MC 的 `ANAKIN_PREFIX` 应各自设置，不能把 Env 的前缀作为全局 MC 前缀。
+每个包的 `em_run.sh` 优先选择本仓库 `install/包名`；该目录不存在时选择共享工作区 `install/包名`。存在但损坏的独立安装会报错，不会静默改用另一个安装。`ANAKIN_PREFIX` 明确指定当前包的安装前缀，`ANAKIN_SDK_PREFIX` 指定 SDK，`ANAKIN_WS` 指定共享工作区。Env 与 MC 的 `ANAKIN_PREFIX` 应各自设置，不能把 Env 的前缀作为全局 MC 前缀。
 
 例如，要确定运行共享工作区内刚构建的 Env：
 
 ```sh
 ANAKIN_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_env \
 ANAKIN_SDK_PREFIX=/home/zdyukino/workspace/anakin_cpp_ws/install/anakin_sdk \
-/home/zdyukino/workspace/anakin_env/en_run.sh --sim --input keyboard
+/home/zdyukino/workspace/anakin_env/em_run.sh --sim --input keyboard
 ```
 
-共享工作区 `en_run.sh` 是普通 Env 入口的转发文件，遵循相同选择规则，并不强制选择工作区安装。MC 的实际入口为 `/home/zdyukino/workspace/anakin_mc/en_run.sh`；不存在 `anakin_cpp_ws/mc_run.sh`。
+共享工作区 `em_run.sh` 是普通 Env 入口的转发文件，遵循相同选择规则，并不强制选择工作区安装。MC 的实际入口为 `/home/zdyukino/workspace/anakin_mc/em_run.sh`；不存在 `anakin_cpp_ws/mc_run.sh`。
 
 启动器检查选定 ELF、其本地 ament 包标记、安装资源和 SDK 构建记录。配置默认只来自该 ELF 所在前缀的 `share/anakin_env/config/`，不从当前目录、源码或其他 overlay 补齐。启动器只执行已安装 C++ ELF，不构建、不安装依赖、不需要 Python 运行时。
 
@@ -46,14 +46,14 @@ SDK 构建元数据记录 Git HEAD；若 SDK 有未提交源代码差异，不�
 
 ```sh
 cd /home/zdyukino/workspace/anakin_mc
-./en_run.sh
+./em_run.sh
 ```
 
 终端二启动 Env，仿真必须显式写 `--sim`：
 
 ```sh
 cd /home/zdyukino/workspace/anakin_env
-./en_run.sh --sim --input keyboard
+./em_run.sh --sim --input keyboard
 ```
 
 终端三由用户启动官方模拟器，使用相同 SDK 端点与原始 29 自由度场景：
@@ -65,10 +65,10 @@ cd /home/zdyukino/workspace/unitree_mujoco/simulate/build
 
 正常流程不要求自动 reset、重生或服务握手。需要重置或摆正仿真机器人时，由用户在官方模拟器内手动操作。SDK tick 回退只增加诊断，Env 的状态序号继续单调递增；不会清空 MC 模型、时间线或历史。重复 tick 不算新的物理反馈。仿真允许倒地姿态直接请求六个业务模式；这不保证某个姿态下机器人能站起或策略稳定。
 
-实机用 `./en_run.sh` 或显式 `./en_run.sh --real`。先复制选定安装内的 `real.yaml`，把 `transport.interface` 改成明确的机器人网卡名称，再通过 `--config` 指定。程序不猜测网卡：
+实机用 `./em_run.sh` 或显式 `./em_run.sh --real`。先复制选定安装内的 `real.yaml`，把 `transport.interface` 改成明确的机器人网卡名称，再通过 `--config` 指定。程序不猜测网卡：
 
 ```sh
-./en_run.sh --real --input remote --config /absolute/path/robot-real.yaml
+./em_run.sh --real --input remote --config /absolute/path/robot-real.yaml
 ```
 
 | 模式 | SDK 网卡 / domain | ROS domain | 可选里程计 / 坐标系 |
@@ -83,8 +83,8 @@ cd /home/zdyukino/workspace/unitree_mujoco/simulate/build
 安装中包含 `sim.yaml`、`real.yaml`、共用 `inputs.yaml`。通过 `--config PATH` 替换所选模式配置，`--input-config PATH` 替换输入配置，`--input keyboard|gamepad|remote` 覆盖普通控制主来源；覆盖文件的 `mode` 必须与 `--sim` / `--real` 一致。路径可以含空格，应正确引用。启动时一次加载，无热重载；错误或未知字段会报出文件和字段并停止启动。
 
 ```sh
-./en_run.sh --sim --input gamepad --input-config /absolute/path/inputs.yaml
-./en_run.sh --sim --input remote --config /absolute/path/sim.yaml --input-config /absolute/path/inputs.yaml
+./em_run.sh --sim --input gamepad --input-config /absolute/path/inputs.yaml
+./em_run.sh --sim --input remote --config /absolute/path/sim.yaml --input-config /absolute/path/inputs.yaml
 ```
 
 共用输入配置的 `primary` 默认 keyboard；`enabled_sources` 默认包含 keyboard、gamepad、remote。普通模式/速度输入只采纳主来源，所有启用来源的紧急停止都会进入同一个停止条件。选择 remote 时，默认从 HG LowState 的无线遥控负载读取；显式测试可以把 `remote.channel` 改成 `wireless_topic`，读取 `rt/wirelesscontroller`。两者使用同一逻辑映射。

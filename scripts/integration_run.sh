@@ -54,7 +54,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-ANAKIN_PREFIX="$ws/install/anakin_mc" "$ws/../anakin_mc/en_run.sh" >"$run/mc.log" 2>&1 &
+ANAKIN_PREFIX="$ws/install/anakin_mc" "$ws/../anakin_mc/em_run.sh" >"$run/mc.log" 2>&1 &
 mc_pid=$!; pids+=("$mc_pid")
 "$binary" --ros-args -p "duration:=$duration" -p "demo_switch:=$demo" >"$run/env.log" 2>&1 &
 env_pid=$!; pids+=("$env_pid")
